@@ -86,6 +86,7 @@ for e in ${ETYPES}; do
     # Report the etype ACTUALLY used, not the one asked for.
     skey=$(klist -e | grep -A1 "MSOLAPSvc.3/${HOST}@" | grep -o 'Etype (skey, tkt): [^,]*' | sed 's/.*: //')
     echo "  session key actually used: ${skey:-UNKNOWN}"
-    [ "${skey}" = "${e}" ] || echo "  *** asked for ${e}, got ${skey} -- the row above measures ${skey}"
+    # The literal word MISMATCH is what CI greps for; keep them in step.
+    [ "${skey}" = "${e}" ] || echo "  *** MISMATCH: asked for ${e}, got ${skey} -- the row above measures ${skey}"
     echo
 done

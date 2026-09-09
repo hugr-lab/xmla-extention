@@ -1,0 +1,114 @@
+name: Kerberos mechanism
+
+# The most valuable workflow in this repository, and the one that changes what is
+# knowable rather than merely re-checking what is known.
+#
+# SSAS has no Linux build, so there is no way to put a Kerberos-speaking Analysis
+# Services instance behind this. There does not need to be: the questions that
+# actually block Kerberos are questions about the MECHANISM -- does gss_wrap_iov
+# give the detached split, what does the token weigh per enctype, does anything
+# pad -- and an MIT KDC with a krb5 acceptor holding the service keytab answers
+# all three.
+#
+# The reference implementation had to mark Kerberos UNVERIFIED because its only
+# fixture was a standalone workgroup Windows box that speaks NTLM only. This
+# removes that excuse for the client half. It does NOT settle the SSAS half; see
+# research D5.
+
+on:
+  pull_request:
+    paths:
+      - 'src/xmla/gss_context.cpp'
+      - 'src/xmla/sealing.cpp'
+      - 'src/xmla/auth.cpp'
+      - 'src/include/xmla/seal_provider.hpp'
+      - 'src/include/xmla/gss_context.hpp'
+      - 'src/include/xmla/sealing.hpp'
+      - 'src/include/xmla/auth.hpp'
+      - 'test/gss/**'
+      - 'CMakeLists.txt'
+      - '.github/workflows/kerberos.yml'
+  schedule:
+    # A distribution's gss-ntlmssp or krb5 can change what these probes report,
+    # and D4's whole finding is about what a plugin does or does not export.
+    # Weekly, so a change is found by a scheduled run rather than by a release.
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+concurrency:
+  group: kerberos-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ntlm-mechanism:
+    name: NTLM - gss_wrap_iov is unavailable, and the split holds
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build the NTLM probe image
+        uses: docker/build-push-action@v5
+        with:
+          context: test/gss/ntlm
+          tags: xmla-gss-ntlm:latest
+          load: true
+          cache-from: type=gha,scope=gss-ntlm
+          cache-to: type=gha,scope=gss-ntlm,mode=max
+
+      # This asserts a NEGATIVE and it is deliberate. research D4 rests on
+      # gss-ntlmssp exporting no IOV entry points; if a future version starts
+      # exporting them, the capability probe in seal_provider picks the other
+      # implementation and the reasoning in the docs goes stale. Better to be
+      # told.
+      - name: gss_wrap_iov is still unavailable for NTLM
+        run: |
+          docker run --rm xmla-gss-ntlm:latest 2>&1 | tee out.txt
+          grep -q "FAIL gss_wrap_iov" out.txt \
+            || { echo "gss_wrap_iov now WORKS for NTLM - research D4 needs revisiting"; exit 1; }
+          grep -q "the frame is buildable for NTLM" out.txt \
+            || { echo "the gss_wrap token split no longer holds"; exit 1; }
+
+  kerberos-mechanism:
+    name: Kerberos - wrap_iov layout against a real KDC
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build the KDC probe image
+        uses: docker/build-push-action@v5
+        with:
+          context: test/gss/kerberos
+          tags: xmla-gss-krb:latest
+          load: true
+          cache-from: type=gha,scope=gss-krb
+          cache-to: type=gha,scope=gss-krb,mode=max
+
+      - name: Stand up the KDC and measure every AES enctype
+        run: docker run --rm xmla-gss-krb:latest 2>&1 | tee out.txt
+
+      - name: Nothing padded, and the frame is expressible
+        run: |
+          # The frame has no field for an unpadded length, so a padding mechanism
+          # cannot be expressed at all. Measured zero for all four AES enctypes;
+          # this fails the build if that ever stops being true.
+          if grep -q "PADDING seen: \*\*\*" out.txt; then
+            echo "an enctype now pads - the frame cannot carry it, see research D5"; exit 1
+          fi
+          for e in aes256-cts-hmac-sha1-96 aes128-cts-hmac-sha1-96 \
+                   aes256-cts-hmac-sha384-192 aes128-cts-hmac-sha256-128; do
+            grep -q "session key actually used: $e" out.txt \
+              || { echo "no measurement for $e - the run did not vary the session key"; exit 1; }
+          done
+          # A run that silently used one principal for every enctype reports four
+          # identical rows and looks like a pass. It happened during development.
+          #
+          # Written as `if`, not `grep -q ... && { exit 1; }`: the && form makes
+          # the step FAIL when grep finds nothing, which is the healthy case.
+          if grep -q "MISMATCH" out.txt; then
+            echo "a run used a principal it did not intend - the rows are not four enctypes"; exit 1
+          fi
+          echo "four enctypes measured, none padded"

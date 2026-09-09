@@ -1,0 +1,35 @@
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - '**.cpp'
+      - '**.hpp'
+      - 'CMakeLists.txt'
+  schedule:
+    - cron: '0 4 * * 2'
+
+jobs:
+  analyze:
+    name: Analyze C++
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      security-events: write
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y libkrb5-dev ninja-build
+
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: c-cpp
+          queries: security-and-quality
+
+      - run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
+      - run: cmake --build build
+
+      - uses: github/codeql-action/analyze@v3
