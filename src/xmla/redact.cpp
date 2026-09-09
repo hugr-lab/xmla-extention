@@ -7,6 +7,14 @@ namespace xmla {
 
 namespace {
 
+//! ASCII-only fold. tolower() follows LC_CTYPE, and this one sits on a
+//! constitution-I path: under tr_TR.UTF-8 glibc's tolower('I') yields U+0130,
+//! which a cast to char truncates, so a host or account literal containing "I"
+//! would stop matching and go UNSCRUBBED into an error message.
+char AsciiLower(char c) {
+	return (c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c;
+}
+
 // SPNs are anchored to the service classes actually in play, NOT to a generic
 // word/word shape. A generic pattern destroyed the very diagnostics this
 // scrubber exists to preserve: "cannot appear under Envelope/Body" - the error
@@ -72,14 +80,19 @@ std::string ReplaceLiteral(const std::string &text, const std::string &needle, c
 	out.reserve(text.size());
 	const size_t n = needle.size();
 	size_t i = 0;
-	auto is_word = [](char c) { return isalnum(static_cast<unsigned char>(c)) || c == '_'; };
+	// ASCII-only, like the fold above and for the same reason: this decides where
+	// a literal host or account name BEGINS and ENDS, so a locale that classifies
+	// more characters as word characters changes the boundary and can leave a
+	// literal unreplaced.
+	auto is_word = [](char c) {
+		return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
+	};
 	while (i < text.size()) {
 		bool matched = false;
 		if (i + n <= text.size()) {
 			bool equal = true;
 			for (size_t k = 0; k < n; k++) {
-				if (tolower(static_cast<unsigned char>(text[i + k])) !=
-					tolower(static_cast<unsigned char>(needle[k]))) {
+				if (AsciiLower(text[i + k]) != AsciiLower(needle[k])) {
 					equal = false;
 					break;
 				}

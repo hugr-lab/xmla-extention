@@ -405,9 +405,12 @@ std::string Credential::Target(const std::string &host, uint16_t port) const {
 
 std::unique_ptr<GssContext> GssContext::Create(const Credential &credential, const std::string &host, uint16_t port,
 											   const std::string &password) {
+	// ASCII-only fold. ::tolower follows LC_CTYPE, and "NEGOTIATE" contains an
+	// I: under tr_TR.UTF-8 it would not fold to "negotiate", so the mechanism
+	// would be REJECTED as unknown on a machine whose only fault is its locale.
 	std::string mech = credential.mechanism;
 	for (auto &c : mech) {
-		c = static_cast<char>(::tolower(static_cast<unsigned char>(c)));
+		c = (c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c;
 	}
 	gss_OID mech_oid;
 	if (mech == "ntlm") {
