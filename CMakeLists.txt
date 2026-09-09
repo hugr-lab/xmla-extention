@@ -100,6 +100,9 @@ set(XMLA_PROTOCOL_SOURCES
     src/xmla/dime.cpp
     src/xmla/transport.cpp
     src/xmla/sealing.cpp
+    src/xmla/rowset.cpp
+    src/xmla/envelopes.cpp
+    src/xmla/redact.cpp
 )
 
 add_library(xmla_protocol STATIC ${XMLA_PROTOCOL_SOURCES})
