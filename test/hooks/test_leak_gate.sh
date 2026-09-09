@@ -109,9 +109,12 @@ run_case() {
     rm -f "$SANDBOX/f.md"
     report "$name" "$got" "$want"
     if [ "$got" = "BLOCK" ] && [ -n "$reason" ]; then
+        # Counted as its own case, so the denominator does not move with the
+        # numerator: previously a reason failure made the total read 18 instead
+        # of 17.
         case "$gate_stderr" in
-            *"$reason"*) echo "        (refused for: $reason)" ;;
-            *) echo "  FAIL  $name: blocked, but not for '$reason'"; fail=$((fail + 1)) ;;
+            *"$reason"*) echo "  ok    ^ refused for: $reason"; pass=$((pass + 1)) ;;
+            *) echo "  FAIL  ^ blocked, but not for '$reason'"; fail=$((fail + 1)) ;;
         esac
     fi
 }
@@ -165,8 +168,8 @@ git -C "$SANDBOX" add b.bin
 run_gate
 report "an unreviewed binary is refused, not silently passed" "$gate_verdict" "BLOCK"
 case "$gate_stderr" in
-    *"binary file cannot be scanned"*) : ;;
-    *) echo "  FAIL  the binary refusal did not name the reason"; fail=$((fail + 1)) ;;
+    *"binary file cannot be scanned"*) echo "  ok    ^ refused for: binary file cannot be scanned"; pass=$((pass + 1)) ;;
+    *) echo "  FAIL  ^ the binary refusal did not name the reason"; fail=$((fail + 1)) ;;
 esac
 
 # The digest must describe the STAGED bytes. Hashing the working tree attests to
@@ -183,20 +186,46 @@ printf '\x00\xff\xfeDIFFERENT\x00' > "$SANDBOX/b.bin"
 run_gate
 report "a binary is refused by its STAGED digest" "$gate_verdict" "BLOCK"
 case "$gate_stderr" in
-    *"$staged_digest"*) : ;;
-    *) echo "  FAIL  the refusal named a digest other than the staged one"; fail=$((fail + 1)) ;;
+    *"$staged_digest"*) echo "  ok    ^ named the staged digest"; pass=$((pass + 1)) ;;
+    *) echo "  FAIL  ^ named a digest other than the staged one"; fail=$((fail + 1)) ;;
 esac
 git -C "$SANDBOX" rm -q --cached b.bin >/dev/null 2>&1; rm -f "$SANDBOX/b.bin"
+
+echo "quoted paths:"
+# With core.quotePath at its default, git renders this filename as a quoted,
+# octal-escaped string. The gate asked cat-file for a path including the literal
+# quotes, that failed, and `|| continue` swallowed it — the file was silently not
+# scanned. Fail-open on any repository with a non-ASCII filename.
+printf '%s' "$SECRET" > "$SANDBOX/café.md"
+git -C "$SANDBOX" add "café.md"
+run_gate
+report "a secret in a non-ASCII filename still blocks" "$gate_verdict" "BLOCK"
+# The REASON matters here. Without -z the gate receives "caf\303\251.md" with
+# literal quotes, cat-file fails, and the file is refused as unreadable — which
+# blocks, but blocks without having scanned anything. Asserting the
+# connection-string reason is what proves the content was actually read.
+case "$gate_stderr" in
+    *"host/SID/connection-string token"*)
+        echo "  ok    ^ the file was scanned, not merely refused as unreadable"; pass=$((pass + 1)) ;;
+    *)  echo "  FAIL  ^ blocked without scanning the content: $gate_stderr"; fail=$((fail + 1)) ;;
+esac
+git -C "$SANDBOX" rm -q --cached "café.md" >/dev/null 2>&1
+rm -f "$SANDBOX/café.md"
 
 echo "hygiene:"
 # The scan directory was created inside a command substitution, so the parent
 # never learned of it and the cleanup trap removed nothing: every staged file
 # leaked a directory containing its staged blob into $TMPDIR. The gate writing
 # out the secrets it exists to catch, and never deleting them.
-before=$(find "${TMPDIR:-/tmp}" -maxdepth 1 -name 'tmp.*' 2>/dev/null | grep -c '' || true)
+# A PRIVATE TMPDIR. Counting entries in the shared /tmp makes the result depend
+# on every other process on the machine: a concurrent mktemp fails the test and
+# blames the gate, and a concurrent cleanup masks a real leak.
+priv=$(mktemp -d)
+before=$(find "$priv" -maxdepth 1 -name 'tmp.*' 2>/dev/null | grep -c '' || true)
 for n in 1 2 3; do printf 'clean %s\n' "$n" > "$SANDBOX/h$n.md"; git -C "$SANDBOX" add "h$n.md"; done
-run_gate
-after=$(find "${TMPDIR:-/tmp}" -maxdepth 1 -name 'tmp.*' 2>/dev/null | grep -c '' || true)
+if (cd "$SANDBOX" && TMPDIR="$priv" "$GATE") >/dev/null 2>&1; then gate_verdict=PASS; else gate_verdict=BLOCK; fi
+after=$(find "$priv" -maxdepth 1 -name 'tmp.*' 2>/dev/null | grep -c '' || true)
+rm -rf "$priv"
 git -C "$SANDBOX" rm -q --cached h1.md h2.md h3.md >/dev/null 2>&1
 rm -f "$SANDBOX"/h*.md
 if [ "$after" -le "$before" ]; then
@@ -208,8 +237,14 @@ else
 fi
 
 echo "invocation modes:"
-if (cd "$REPO_ROOT" && LEAK_GATE_FILES_CMD="git ls-files" "$GATE") >/dev/null 2>&1; then got=PASS; else got=BLOCK; fi
+if (cd "$REPO_ROOT" && LEAK_GATE_FILES_CMD="git ls-files -z" "$GATE") >/dev/null 2>&1; then got=PASS; else got=BLOCK; fi
 report "an explicit file list scans the whole tree" "$got" "PASS"
+
+# The list command MUST emit NUL-delimited paths now. A caller that forgets is a
+# broken invocation, and the gate must refuse rather than mis-parse — this case
+# is what caught the ci.yml invocation when -z was introduced.
+if (cd "$REPO_ROOT" && LEAK_GATE_FILES_CMD="git ls-files" "$GATE") >/dev/null 2>&1; then got=PASS; else got=BLOCK; fi
+report "a newline-delimited file list is refused, not mis-parsed" "$got" "BLOCK"
 if (cd "$REPO_ROOT" && LEAK_GATE_FILES_CMD="true" "$GATE") >/dev/null 2>&1; then got=PASS; else got=BLOCK; fi
 report "an explicit list that yields nothing is refused" "$got" "BLOCK"
 

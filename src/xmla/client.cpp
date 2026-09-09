@@ -17,10 +17,16 @@ namespace {
 //! request was bad". Keeps AuthorizationError distinct from ServerError.
 const char *const kDeniedMarkers[] = {"does not have access", "permission", "not authorized", "access is denied"};
 
+//! ASCII-only. ::tolower follows LC_CTYPE, and this fold decides an ERROR
+//! CATEGORY: the result is matched against kDeniedMarkers to tell "you are known
+//! but not permitted" from "the request was bad". Under tr_TR.UTF-8 a fault
+//! containing "Permission" or "Not Authorized" would not fold to the marker, and
+//! an AuthorizationError would be reported as a ServerError — sending the
+//! operator to check the request instead of the account's permissions.
 std::string ToLower(const std::string &in) {
 	std::string out = in;
 	std::transform(out.begin(), out.end(), out.begin(),
-				   [](unsigned char c) { return static_cast<char>(::tolower(c)); });
+				   [](char c) { return (c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c; });
 	return out;
 }
 
@@ -36,7 +42,9 @@ bool LooksLikeXmla(const std::string &text) {
 		static_cast<uint8_t>(text[2]) == 0xBF) {
 		i = 3;
 	}
-	while (i < text.size() && isspace(static_cast<unsigned char>(text[i]))) {
+	// XML leading whitespace is exactly these four (XML 1.0 §2.3); isspace()
+	// follows LC_CTYPE and in some locales accepts more.
+	while (i < text.size() && (text[i] == ' ' || text[i] == '\t' || text[i] == '\r' || text[i] == '\n')) {
 		i++;
 	}
 	return i < text.size() && text[i] == '<';

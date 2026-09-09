@@ -52,7 +52,10 @@ jobs:
       # is an error rather than a pass, because a green run that checked nothing
       # is worse than no job at all.
       - name: Leak gate over every tracked file
-        run: LEAK_GATE_FILES_CMD="git ls-files" .githooks/pre-commit
+        # -z: the gate reads NUL-delimited paths, because core.quotePath otherwise
+        # renders a non-ASCII filename as a quoted, escaped string that cannot be
+        # read back — and the old code swallowed that failure silently.
+        run: LEAK_GATE_FILES_CMD="git ls-files -z" .githooks/pre-commit
 
       # The gate has failed in three ways that all looked like working: scanning
       # the working tree while listing from the index, an EXIT trap that made
@@ -106,7 +109,9 @@ jobs:
              -DXMLA_REQUIRE_GSS=${{ matrix.os.require_gss }}
 
       - name: Build
-        run: cmake --build build
+        # xmla_test is EXCLUDE_FROM_ALL so that CodeQL's default-target build
+        # analyses only shipped code; the test jobs ask for it by name.
+        run: cmake --build build --target xmla_test
 
       # Constitution III: the suite must pass on a machine that has never
       # contacted an Analysis Services instance. Nothing here reaches a network.
@@ -126,5 +131,5 @@ jobs:
       # the code that most needs it.
       - run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
              -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
-      - run: cmake --build build
+      - run: cmake --build build --target xmla_test
       - run: ./build/xmla_test

@@ -33,7 +33,16 @@ explicit_files_cmd="${LEAK_GATE_FILES_CMD:+yes}"
 # in NO file list, and was never scanned in either direction. Verified: a rename
 # detected at 62% similarity carrying `Data Source=` passed the gate. `--name-only`
 # emits the new path for an R entry, which is the one to scan.
-files_cmd="${LEAK_GATE_FILES_CMD:-git diff --cached --name-only --diff-filter=ACMRT}"
+# NUL-delimited, and the file list command MUST emit NUL-delimited paths.
+#
+# With core.quotePath at its default, git renders a path containing non-ASCII
+# bytes as a double-quoted, octal-escaped string -- "docs/caf\303\251.md". The
+# loop then asked cat-file for a path including the literal quotes, that failed,
+# and `|| continue` swallowed it: the file was silently NOT SCANNED. Fail-open,
+# on any repository with a non-ASCII filename. -z suppresses that encoding
+# entirely, which is more robust than turning quotePath off, because it also
+# handles a newline in a path.
+files_cmd="${LEAK_GATE_FILES_CMD:-git diff --cached --name-only -z --diff-filter=ACMRT}"
 
 # Scan the STAGED blob, not the working-tree file.
 #
@@ -87,7 +96,7 @@ sha256_of() {
 
 leak=0
 scanned=0
-while IFS= read -r f; do
+while IFS= read -r -d '' f; do
   # Resolved in the PARENT shell, not through a command substitution: a subshell
   # cannot record the temp directory it creates.
   #
@@ -99,8 +108,19 @@ while IFS= read -r f; do
     [ -f "$scan_target" ] || continue
   else
     scan_target="$scan_dir/blob"
-    # No staged blob (staged as a deletion, or unmerged): nothing to scan.
-    git cat-file blob ":$f" > "$scan_target" 2>/dev/null || continue
+    # A cat-file failure is an ERROR, not a skip.
+    #
+    # This used to `|| continue`, described as covering "staged as a deletion, or
+    # unmerged" -- but --diff-filter=ACMRT excludes D and U, so neither can reach
+    # here. What could reach here was a quoted path, a corrupt index, or a file
+    # list produced from a different repository root, and every one of them was
+    # discarded without a word: the gate reported clean on a file it never read.
+    if ! git cat-file blob ":$f" > "$scan_target" 2>/dev/null; then
+      echo "leak-gate: cannot read the staged content of: $f" >&2
+      echo "  the gate will not report clean on a file it could not scan" >&2
+      leak=1
+      continue
+    fi
   fi
   # Counted HERE, not at the end of the body: every `continue` below -- the hook
   # itself, and BOTH binary outcomes including an allowlisted one -- skipped the
