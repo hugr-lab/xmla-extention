@@ -41,6 +41,12 @@ std::string XmlEscape(const std::string &in) {
 
 namespace {
 
+// CANARY: a deliberately unreachable static, to prove CodeQL still analyses
+// src/ after test/cpp was excluded. Reverted immediately.
+static int CodeqlCanaryUnusedFunction(int x) {
+	return x * 2;
+}
+
 //! ASCII-only case fold and classification.
 //!
 //! ::toupper and isalpha follow the global LC_CTYPE, and a DuckDB extension is
