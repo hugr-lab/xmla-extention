@@ -11,11 +11,29 @@ set -euo pipefail
 nonip='(\bWIN-[A-Z0-9]{6,}\b)|(\bS-1-([0-9]+-)+[0-9]+\b)|((Data Source|Initial Catalog|User ID|Password)=)'
 allow_ip='^(127\.|0\.0\.0\.0$|192\.0\.2\.|198\.51\.100\.|203\.0\.113\.|255\.255\.255\.)'
 
+# Whether an empty file list is an error depends on who asked. A caller that named
+# its own command (CI scanning every tracked file) meant to scan something, so zero
+# files is a broken invocation. The default staged-files command legitimately yields
+# nothing for a message-only `--amend` or a merge commit, and blocking those would
+# be a false refusal.
+#
+# Assigned BEFORE the functions that read it. It used to sit twenty lines below
+# them and worked only because the first call happened later still; under `set -u`
+# any reordering turns the gate into an immediate unbound-variable abort.
+explicit_files_cmd="${LEAK_GATE_FILES_CMD:+yes}"
+
 # The file list is indirected so CI can scan every tracked file with the SAME
 # script, rather than reconstructing it with sed. A sed that stops matching after
 # a reword silently produces a gate that scans nothing and exits 0 -- green while
 # checking zero files, which is worse than having no job at all.
-files_cmd="${LEAK_GATE_FILES_CMD:-git diff --cached --name-only --diff-filter=ACM}"
+#
+# R and T are in the filter deliberately. `--diff-filter=ACM` excludes renames,
+# and `git diff --cached` has rename detection ON by default -- so `git mv a b`
+# plus an edit that introduces a connection string produced an `R` entry, appeared
+# in NO file list, and was never scanned in either direction. Verified: a rename
+# detected at 62% similarity carrying `Data Source=` passed the gate. `--name-only`
+# emits the new path for an R entry, which is the one to scan.
+files_cmd="${LEAK_GATE_FILES_CMD:-git diff --cached --name-only --diff-filter=ACMRT}"
 
 # Scan the STAGED blob, not the working-tree file.
 #
@@ -33,7 +51,20 @@ files_cmd="${LEAK_GATE_FILES_CMD:-git diff --cached --name-only --diff-filter=AC
 #
 # When the caller supplied its own file list (CI scanning every tracked file)
 # there is no index to read from, so the working tree IS the subject.
+#
+# The temp directory is created ONCE, HERE, in the parent shell. It was created
+# inside `scan_target=$(materialise "$f")` -- a command substitution, therefore a
+# subshell -- so the assignment never reached the parent: every staged file
+# allocated a fresh `mktemp -d` that nothing recorded, and the cleanup trap always
+# took its false branch. A commit staging twenty files left twenty directories in
+# $TMPDIR, each holding the staged blob. That is the gate writing out the very
+# secrets it exists to catch, and never deleting them. Verified before the fix:
+# three staged files, three leaked directories.
 scan_dir=""
+if [ -z "$explicit_files_cmd" ]; then
+  scan_dir=$(mktemp -d) || exit 1
+fi
+
 # `return 0` is load-bearing. An EXIT trap whose last command fails sets the
 # script's exit status, so `[ -n "$scan_dir" ] && rm -rf ...` made EVERY run
 # exit 1 when scan_dir was empty -- a gate that blocks everything, which reads
@@ -46,33 +77,6 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Materialise the staged content of $1 and echo the path to scan. Falls back to
-# the working-tree path when there is no index entry (an explicit file list, or
-# a file staged as a deletion).
-materialise() {
-  local path="$1"
-  if [ -n "$explicit_files_cmd" ]; then
-    printf '%s' "$path"
-    return 0
-  fi
-  if [ -z "$scan_dir" ]; then
-    scan_dir=$(mktemp -d) || return 1
-  fi
-  local out="$scan_dir/blob"
-  if git cat-file blob ":$path" > "$out" 2>/dev/null; then
-    printf '%s' "$out"
-  else
-    # No staged blob (deleted, or unmerged). Nothing to scan.
-    return 1
-  fi
-}
-# Whether an empty file list is an error depends on who asked. A caller that named
-# its own command (CI scanning every tracked file) meant to scan something, so zero
-# files is a broken invocation. The default staged-files command legitimately yields
-# nothing for a message-only `--amend` or a merge commit, and blocking those would
-# be a false refusal.
-explicit_files_cmd="${LEAK_GATE_FILES_CMD:+yes}"
-
 # Digest of a reviewed binary. Fails CLOSED: with no sha256 tool the placeholder
 # matches no allowlist entry, so every binary is refused rather than waved past.
 sha256_of() {
@@ -84,11 +88,20 @@ sha256_of() {
 leak=0
 scanned=0
 while IFS= read -r f; do
-  # `-f` tests the WORKING TREE, which is wrong for a staged rename or a file
-  # that has since been removed on disk but is still staged for commit. The
-  # index is the authority here, so let materialise decide.
-  scan_target=$(materialise "$f") || continue
-  [ -f "$scan_target" ] || continue
+  # Resolved in the PARENT shell, not through a command substitution: a subshell
+  # cannot record the temp directory it creates.
+  #
+  # `-f` on the working-tree path would be wrong here anyway. A file staged with
+  # content and then deleted from disk is still going into the commit, and the
+  # index is the authority for what that commit contains.
+  if [ -n "$explicit_files_cmd" ]; then
+    scan_target="$f"
+    [ -f "$scan_target" ] || continue
+  else
+    scan_target="$scan_dir/blob"
+    # No staged blob (staged as a deletion, or unmerged): nothing to scan.
+    git cat-file blob ":$f" > "$scan_target" 2>/dev/null || continue
+  fi
   # Counted HERE, not at the end of the body: every `continue` below -- the hook
   # itself, and BOTH binary outcomes including an allowlisted one -- skipped the
   # increment, so a list of only reviewed binaries reported "the file list is
