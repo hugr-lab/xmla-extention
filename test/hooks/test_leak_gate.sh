@@ -70,26 +70,82 @@ report() {
     fi
 }
 
-# run_case <name> <expected PASS|BLOCK> <staged content> [working-tree content]
+# Run the gate in the sandbox and capture BOTH verdict and stderr.
+#
+# Reducing a case to its exit code cannot tell "scanned and found clean" from
+# "never scanned" — which is failure mode 1 in the header, and would leave six of
+# these cases reporting ok if materialise started failing for every file. A BLOCK
+# expectation has the mirror problem: it cannot tell a connection-string finding
+# from an unrelated refusal. So PASS cases assert the file was actually counted,
+# and BLOCK cases assert WHY.
+gate_stderr=""
+gate_verdict=""
+# Sets the two globals. Deliberately NOT `verdict=$(run_gate)`: a command
+# substitution is a subshell, so the stderr capture would never reach the caller
+# — which is precisely the bug this suite exists to pin in the gate itself, and
+# the first version of this helper had it too.
+run_gate() {
+    local err_file="$SANDBOX/.gate_stderr"
+    if (cd "$SANDBOX" && "$GATE") >/dev/null 2>"$err_file"; then
+        gate_verdict=PASS
+    else
+        gate_verdict=BLOCK
+    fi
+    gate_stderr=$(cat "$err_file" 2>/dev/null || true)
+    rm -f "$err_file"
+}
+
+# run_case <name> <expected PASS|BLOCK> <staged content> [worktree content] [expected reason]
 run_case() {
-    local name="$1" want="$2" staged="$3" worktree="${4:-}"
+    local name="$1" want="$2" staged="$3" worktree="${4:-}" reason="${5:-}"
     printf '%s' "$staged" > "$SANDBOX/f.md"
     git -C "$SANDBOX" add f.md
     if [ -n "$worktree" ]; then
         printf '%s' "$worktree" > "$SANDBOX/f.md"
     fi
-    local got
-    if (cd "$SANDBOX" && "$GATE") >/dev/null 2>&1; then got=PASS; else got=BLOCK; fi
+    run_gate
+    local got="$gate_verdict"
     git -C "$SANDBOX" rm -q --cached f.md >/dev/null 2>&1
     rm -f "$SANDBOX/f.md"
     report "$name" "$got" "$want"
+    if [ "$got" = "BLOCK" ] && [ -n "$reason" ]; then
+        case "$gate_stderr" in
+            *"$reason"*) echo "        (refused for: $reason)" ;;
+            *) echo "  FAIL  $name: blocked, but not for '$reason'"; fail=$((fail + 1)) ;;
+        esac
+    fi
 }
 
+CONN_REASON="host/SID/connection-string token"
+
 echo "staged-content semantics:"
-run_case "a secret staged, working tree cleaned, still blocks"  BLOCK "$SECRET"  "$CLEAN"
+run_case "a secret staged, working tree cleaned, still blocks"  BLOCK "$SECRET"  "$CLEAN"  "$CONN_REASON"
 run_case "clean staged, working tree dirty, still passes"       PASS  "$CLEAN"   "$SECRET"
-run_case "a secret staged and on disk blocks"                   BLOCK "$SECRET"  ""
+run_case "a secret staged and on disk blocks"                   BLOCK "$SECRET"  ""        "$CONN_REASON"
 run_case "clean staged and on disk passes"                      PASS  "$CLEAN"   ""
+
+# A file staged with content and then deleted from disk is still going into the
+# commit. `-f` on the working-tree path would skip it entirely.
+printf '%s' "$SECRET" > "$SANDBOX/gone.md"
+git -C "$SANDBOX" add gone.md
+rm -f "$SANDBOX/gone.md"
+run_gate
+report "a secret staged, then removed from disk, still blocks" "$gate_verdict" "BLOCK"
+git -C "$SANDBOX" rm -q --cached gone.md >/dev/null 2>&1
+
+# A staged RENAME. `--diff-filter=ACM` excludes R, and rename detection is on by
+# default, so `git mv` plus an edit produced an R entry that appeared in no file
+# list and was scanned in neither direction. Verified failing open before the fix.
+git -C "$SANDBOX" commit -q --allow-empty -m base
+for i in $(seq 1 40); do echo "filler line $i"; done > "$SANDBOX/orig.md"
+git -C "$SANDBOX" add orig.md
+git -C "$SANDBOX" commit -q -m "add orig"
+git -C "$SANDBOX" mv orig.md renamed.md
+printf '%s' "$SECRET" >> "$SANDBOX/renamed.md"
+git -C "$SANDBOX" add -A
+run_gate
+report "a staged rename carrying a secret blocks" "$gate_verdict" "BLOCK"
+git -C "$SANDBOX" reset -q --hard HEAD
 
 echo "token classes:"
 run_case "a non-reserved IPv4 blocks"                           BLOCK "$BAD_IP"  ""
@@ -106,9 +162,50 @@ echo "binaries:"
 # reached a public repository.
 printf '\x00\x01\x02binary\x00' > "$SANDBOX/b.bin"
 git -C "$SANDBOX" add b.bin
-if (cd "$SANDBOX" && "$GATE") >/dev/null 2>&1; then got=PASS; else got=BLOCK; fi
-report "an unreviewed binary is refused, not silently passed" "$got" "BLOCK"
+run_gate
+report "an unreviewed binary is refused, not silently passed" "$gate_verdict" "BLOCK"
+case "$gate_stderr" in
+    *"binary file cannot be scanned"*) : ;;
+    *) echo "  FAIL  the binary refusal did not name the reason"; fail=$((fail + 1)) ;;
+esac
+
+# The digest must describe the STAGED bytes. Hashing the working tree attests to
+# a blob other than the one being committed, so an allowlist entry could vouch
+# for content that never lands. Staging one binary and leaving different bytes on
+# disk is what tells the two apart — a test that leaves identical bytes passes
+# against the old working-tree-hashing code too.
+if command -v sha256sum >/dev/null 2>&1; then
+    staged_digest=$(git -C "$SANDBOX" cat-file blob :b.bin | sha256sum | cut -d" " -f1)
+else
+    staged_digest=$(git -C "$SANDBOX" cat-file blob :b.bin | shasum -a 256 | cut -d" " -f1)
+fi
+printf '\x00\xff\xfeDIFFERENT\x00' > "$SANDBOX/b.bin"
+run_gate
+report "a binary is refused by its STAGED digest" "$gate_verdict" "BLOCK"
+case "$gate_stderr" in
+    *"$staged_digest"*) : ;;
+    *) echo "  FAIL  the refusal named a digest other than the staged one"; fail=$((fail + 1)) ;;
+esac
 git -C "$SANDBOX" rm -q --cached b.bin >/dev/null 2>&1; rm -f "$SANDBOX/b.bin"
+
+echo "hygiene:"
+# The scan directory was created inside a command substitution, so the parent
+# never learned of it and the cleanup trap removed nothing: every staged file
+# leaked a directory containing its staged blob into $TMPDIR. The gate writing
+# out the secrets it exists to catch, and never deleting them.
+before=$(find "${TMPDIR:-/tmp}" -maxdepth 1 -name 'tmp.*' 2>/dev/null | grep -c '' || true)
+for n in 1 2 3; do printf 'clean %s\n' "$n" > "$SANDBOX/h$n.md"; git -C "$SANDBOX" add "h$n.md"; done
+run_gate
+after=$(find "${TMPDIR:-/tmp}" -maxdepth 1 -name 'tmp.*' 2>/dev/null | grep -c '' || true)
+git -C "$SANDBOX" rm -q --cached h1.md h2.md h3.md >/dev/null 2>&1
+rm -f "$SANDBOX"/h*.md
+if [ "$after" -le "$before" ]; then
+    echo "  ok    the scan directory is cleaned up"
+    pass=$((pass + 1))
+else
+    echo "  FAIL  leaked $((after - before)) scan director(ies) for 3 staged files"
+    fail=$((fail + 1))
+fi
 
 echo "invocation modes:"
 if (cd "$REPO_ROOT" && LEAK_GATE_FILES_CMD="git ls-files" "$GATE") >/dev/null 2>&1; then got=PASS; else got=BLOCK; fi
