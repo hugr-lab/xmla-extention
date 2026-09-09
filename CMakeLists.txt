@@ -53,6 +53,7 @@ endif()
 # =============================================================================
 set(XMLA_PROTOCOL_SOURCES
     src/xmla/dime.cpp
+    src/xmla/transport.cpp
 )
 
 add_library(xmla_protocol STATIC ${XMLA_PROTOCOL_SOURCES})
