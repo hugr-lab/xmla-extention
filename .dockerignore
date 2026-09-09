@@ -1,5 +1,27 @@
-# The DuckDB submodule is ~500 MB and the probe image does not build against it.
-duckdb/
-extension-ci-tools/
-build/
-.git/
+# DENY BY DEFAULT, then re-admit what the probe image needs, IN SORTED ORDER.
+#
+# The probe's Dockerfile does `COPY . /src/`, so an ignore list of "the big
+# directories" copies whatever else is in the working tree — including exactly
+# the files .gitignore calls out as carrying a real host, account or ticket:
+# .env, .env.local, *.keytab, *.ccache. Baked into an image layer, that outlives
+# deleting the file. An allowlist cannot be widened by forgetting something.
+#
+# The re-admissions are SORTED. Apple's `container` build refuses an unsorted
+# set with `changes out of order: "test/cpp" "src/xmla_extension.cpp"`, which
+# reads like a corrupt context and is really just this list's ordering.
+*
+!.clang-format
+!CMakeLists.txt
+!scripts
+!src
+!test
+!tools
+
+# Belt and braces: even if a rule above ever re-admits a parent, these never
+# come in. Constitution I.
+.env
+.env.*
+*.keytab
+*.ccache
+*.pem
+*.key

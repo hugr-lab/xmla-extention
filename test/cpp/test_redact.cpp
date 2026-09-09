@@ -111,3 +111,23 @@ TEST_CASE("a MACHINE\\INSTANCE datasource name is scrubbed") {
 	const std::string out = scrub(sample);
 	REQUIRE(!Has(out, "A1B2C3D4E5"));
 }
+
+TEST_CASE("a literal is matched case-insensitively, so a fold regression leaks") {
+	// Every other redaction test supplies a literal whose case already matches
+	// the text ("h", "sql", "reader"), so ReplaceLiteral's comparison could be
+	// replaced by an identity fold and the suite would still pass — while a host
+	// or account name differing only in case went UNSCRUBBED into an error
+	// message. That is the constitution-I path, so it gets its own case.
+	Scrubber scrub("Analysis-Host", "Reader", "");
+	const std::string out = scrub("failed on analysis-HOST as READER");
+	REQUIRE(!Has(out, "analysis-HOST"));
+	REQUIRE(!Has(out, "READER"));
+	REQUIRE(Has(out, "<HOST>"));
+	REQUIRE(Has(out, "<USER>"));
+
+	// And the ASCII fold must not depend on the locale: under tr_TR a
+	// locale-aware tolower('I') does not yield 'i', so a literal containing I
+	// would stop matching. "Instance" is the interesting case.
+	Scrubber ins("INSTANCE-I", "", "");
+	REQUIRE(!Has(ins("connected to instance-i now"), "instance-i"));
+}

@@ -1,6 +1,5 @@
 #include "xmla/redact.hpp"
 
-#include <cctype>
 #include <regex>
 
 namespace xmla {

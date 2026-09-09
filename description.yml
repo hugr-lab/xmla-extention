@@ -17,14 +17,20 @@ extension:
 
 repo:
   github: "hugr-lab/xmla-extention"
-  ref: "main"
+  # An immutable commit SHA, not a branch: the community-extensions build checks
+  # out this exact object so a published build is reproducible, and its
+  # validation rejects a branch name. Update it with each release.
+  ref: "0000000000000000000000000000000000000000"
 
 docs:
+  # 0.0.1 registers no functions and no ATTACH path — the protocol layer is
+  # complete and verified against a live instance, the SQL surface is T-034..T-037.
+  # A copy-pasteable example that cannot work is worse than none, so this shows
+  # only what 0.0.1 actually does.
   hello_world: |
     INSTALL xmla FROM community;
     LOAD xmla;
-    ATTACH 'host=ssas-host port=2383' AS aw (TYPE xmla);
-    SELECT * FROM aw.model."Internet Sales" LIMIT 10;
+    SELECT extension_version FROM duckdb_extensions() WHERE extension_name = 'xmla';
 
   extended_description: |
     Reads SQL Server Analysis Services over the **native XMLA/TCP binding**, so a

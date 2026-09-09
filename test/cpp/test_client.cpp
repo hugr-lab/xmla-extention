@@ -135,6 +135,36 @@ TEST_CASE("a permission fault is Authorization, not Server") {
 	REQUIRE_THROWS_EXACTLY(AuthorizationError, session.Discover("DBSCHEMA_CATALOGS"));
 }
 
+TEST_CASE("a permission fault is classified whatever its casing") {
+	// The existing classification test uses "The user does not have access to the
+	// database.", whose text already matches a kDeniedMarkers entry verbatim — so
+	// an IDENTITY fold passes it, and the ASCII ToLower it exercises could stop
+	// folding without any test noticing. That is the same shape as the defect
+	// this whole branch exists to prevent.
+	//
+	// These faults only classify as AuthorizationError if the fold actually runs.
+	const char *denied[] = {
+		"Permission Denied for this operation.",
+		"The caller is Not Authorized.",
+		"ACCESS IS DENIED",
+		"The user DOES NOT HAVE ACCESS to the database.",
+	};
+	for (const char *text : denied) {
+		auto chan = std::make_shared<BytesChannel>();
+		chan->Queue(PlainResponseWire(kAuthResponse, 0));
+		FakeSealProvider server_side(16, 2888);
+		const std::string fault = std::string(
+									  "<Envelope><Body><Fault>"
+									  "<faultcode>XMLAnalysisError</faultcode><faultstring>") +
+								  text + "</faultstring></Fault></Body></Envelope>";
+		chan->Queue(SealedResponseWire(server_side, fault, 0));
+
+		Session session(Target(), Credential());
+		session.Open(chan, std::unique_ptr<GssContext>(new FakeGssContext(1, 16, 2888)));
+		REQUIRE_THROWS_EXACTLY(AuthorizationError, session.Discover("DBSCHEMA_CATALOGS"));
+	}
+}
+
 TEST_CASE("a response that does not decrypt to XML raises, rather than parsing to empty") {
 	// An empty rowset is a meaningful answer, so a cipher-layer failure must not
 	// be indistinguishable from one.

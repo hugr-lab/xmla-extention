@@ -126,13 +126,23 @@ endif()
 # Hermetic protocol tests. No sockets, no server, no DuckDB.
 # =============================================================================
 file(GLOB XMLA_TEST_SOURCES test/cpp/*.cpp)
-# EXCLUDE_FROM_ALL so the default target builds only what SHIPS.
+# Whether the tests are part of the DEFAULT target is an option, defaulting ON.
 #
-# That is what lets the CodeQL job say `cmake --build build` and analyse exactly
-# the shipped code, without a hardcoded target list in the workflow that would
-# silently drop a new target — most obviously the DuckDB extension target itself,
-# which does not exist yet. Test jobs build it by name.
-add_executable(xmla_test EXCLUDE_FROM_ALL ${XMLA_TEST_SOURCES})
+# CodeQL needs them OUT, so it can say `cmake --build build` and analyse exactly
+# the shipped code without a hardcoded target list that would silently drop a new
+# target. But making EXCLUDE_FROM_ALL unconditional broke two documented entry
+# points and said nothing: README's `cmake --build build && ./build/xmla_test`
+# produced no binary, and `ctest` reported a missing executable because CTest
+# does not build a test's dependencies.
+#
+# So the exclusion is now requested where it is wanted (-DXMLA_BUILD_TESTS=OFF in
+# codeql.yml) rather than imposed on everyone.
+option(XMLA_BUILD_TESTS "Build the hermetic protocol tests as part of the default target" ON)
+if(XMLA_BUILD_TESTS)
+    add_executable(xmla_test ${XMLA_TEST_SOURCES})
+else()
+    add_executable(xmla_test EXCLUDE_FROM_ALL ${XMLA_TEST_SOURCES})
+endif()
 target_include_directories(xmla_test PRIVATE test/cpp)
 target_link_libraries(xmla_test xmla_protocol)
 

@@ -219,9 +219,17 @@ TEST_CASE("the allowlist does not depend on the process locale") {
 	// on the Linux legs this cannot demonstrate anything. Say so rather than
 	// reporting a pass that asserted nothing about the locale at all.
 	const bool switched = setlocale(LC_CTYPE, "tr_TR.UTF-8") != nullptr;
-	std::printf(switched ? "        [tr_TR.UTF-8 in force]\n"
-						 : "        [tr_TR.UTF-8 unavailable; ASCII path only, see "
-						   "scripts/ci/check_locale_independence.sh for the real guard]\n");
+	// A literal format string in each branch: the ternary form passes a
+	// NON-CONSTANT one, which is the shape -Wformat-nonliteral and CodeQL's
+	// cpp/non-constant-format flag. Safe here (neither branch contains a %), but
+	// this branch is already being driven by CodeQL findings.
+	if (switched) {
+		std::printf("        [tr_TR.UTF-8 in force]\n");
+	} else {
+		std::printf(
+			"        [tr_TR.UTF-8 unavailable; ASCII path only, see "
+			"scripts/ci/check_locale_independence.sh for the real guard]\n");
+	}
 	const std::string env = Execute("with member [M] as 1 select {} on 0 from [S]", "", "");
 	REQUIRE(Has(env, "<Statement>"));
 	Execute("define var x = 1 evaluate ROW(\"a\", x)", "", "");

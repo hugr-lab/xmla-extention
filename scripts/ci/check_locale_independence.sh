@@ -19,6 +19,15 @@
 # and went green while the same defect was live in two others.
 set -euo pipefail
 
+command -v perl >/dev/null 2>&1 || {
+    # The comment stripper is not optional. Without it every file whose comment
+    # EXPLAINS why these calls are avoided reports as a violation, and the
+    # operator gets errors pointing at comment lines with no indication that the
+    # stripper never ran. Falling back to `cat` did exactly that, silently.
+    echo "locale: perl is required to strip comments before matching" >&2
+    exit 1
+}
+
 files=$(find src/xmla src/include/xmla \( -name '*.cpp' -o -name '*.hpp' \) -print)
 
 count=$(printf '%s\n' "$files" | grep -c '[^[:space:]]' || true)
@@ -29,7 +38,14 @@ fi
 
 # The wide variants and the case-insensitive string compares fold per LC_CTYPE
 # too. isxdigit/ispunct are plausible additions to an XML scanner.
-pattern='(^|[^[:alnum:]_.>:])(isalpha|isalnum|isupper|islower|isspace|isdigit|isxdigit|ispunct|isprint|isblank|iscntrl|isgraph|toupper|tolower|towupper|towlower|strcasecmp|strncasecmp)[[:space:]]*\('
+# The prefix class excludes `.` and `>` so a member call (obj.isspace, p->isspace)
+# is not a false positive. It must NOT exclude `:`: that is the character before
+# the name in EVERY qualified call — `::tolower(`, `std::tolower(`,
+# `std::isspace(` — so excluding it made the guard blind to the exact form the
+# original defect took (`::toupper`) and the form this branch removed from
+# client.cpp (`::tolower`). Measured: 1 of 4 calls matched with `:` excluded,
+# 4 of 4 without it.
+pattern='(^|[^[:alnum:]_.>])(isalpha|isalnum|isupper|islower|isspace|isdigit|isxdigit|ispunct|isprint|isblank|iscntrl|isgraph|toupper|tolower|towupper|towlower|strcasecmp|strncasecmp)[[:space:]]*\('
 
 fail=0
 while IFS= read -r f; do
@@ -40,7 +56,7 @@ while IFS= read -r f; do
     # a URL literal, hiding real code after it — so block comments are removed
     # first and the line-comment strip requires whitespace or start-of-line
     # before the slashes.
-    stripped=$(perl -0pe 's{/\*.*?\*/}{}gs; s{(^|\s)//.*$}{$1}gm' "$f" 2>/dev/null || cat "$f")
+    stripped=$(perl -0pe 's{/\*.*?\*/}{}gs; s{(^|\s)//.*$}{$1}gm' "$f")
     if printf '%s' "$stripped" | grep -nE "$pattern" >/dev/null 2>&1; then
         echo "locale: $f calls a locale-sensitive ctype function" >&2
         printf '%s' "$stripped" | grep -nE "$pattern" | sed 's/^/    /' >&2

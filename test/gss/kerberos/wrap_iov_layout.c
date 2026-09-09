@@ -123,7 +123,19 @@ int main(int argc, char **argv) {
 		 * Only assert it from 8 bytes up, where a coincidence is 2^-64. The small
 		 * sizes still assert length-preservation and the round-trip, which are
 		 * deterministic and are what the frame actually depends on. */
-		int enc_checked = (plen >= 8);
+		/* conf_state is the mechanism's OWN answer to "did you encrypt?", it is
+		 * deterministic, and it does not care how big the payload is. It was
+		 * being computed and thrown away while a byte-comparison stood in for
+		 * it. Assert it at EVERY size; the byte comparison is then only a
+		 * cross-check, and only where it is meaningful. */
+		if (!conf) {
+			printf("*** conf_state=0: the mechanism reports it did NOT encrypt\n");
+			ok = 0;
+		}
+		/* 3 bytes is 2^-24 — comparable to the KDC container's own flake rate —
+		 * so only the 1-byte row is genuinely a coin flip. Excluding more than
+		 * that discards real measurement to buy nothing. */
+		int enc_checked = (plen >= 3);
 		int enc_ok = !enc_checked || memcmp(iov[1].buffer.value, orig, plen) != 0;
 		if (!len_ok || !enc_ok) ok = 0;
 
@@ -134,7 +146,10 @@ int main(int argc, char **argv) {
 		riov[1].type = GSS_IOV_BUFFER_TYPE_DATA;    riov[1].buffer = iov[1].buffer;
 		riov[2].type = GSS_IOV_BUFFER_TYPE_PADDING; riov[2].buffer = iov[2].buffer;
 		riov[3].type = GSS_IOV_BUFFER_TYPE_TRAILER; riov[3].buffer = iov[3].buffer;
-		OM_uint32 umaj = gss_unwrap_iov(&min, sx, &conf, NULL, riov, 4);
+		/* NOT into `conf`: that would overwrite the wrap's answer before it has
+		 * been asserted, which is how it came to be unused in the first place. */
+		int unwrap_conf = 0;
+		OM_uint32 umaj = gss_unwrap_iov(&min, sx, &unwrap_conf, NULL, riov, 4);
 		int rt = (umaj == GSS_S_COMPLETE && riov[1].buffer.length == plen && !memcmp(riov[1].buffer.value, orig, plen));
 		if (!rt) ok = 0;
 
