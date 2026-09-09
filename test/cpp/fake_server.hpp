@@ -20,6 +20,7 @@
 #include "xmla/sealing.hpp"
 #include "xmla/transport.hpp"
 
+#include <algorithm>
 #include <memory>
 #include <string>
 

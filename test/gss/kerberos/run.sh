@@ -84,7 +84,12 @@ for e in ${ETYPES}; do
     fi
     /probe "MSOLAPSvc.3@${HOST}" || echo "  probe exited non-zero"
     # Report the etype ACTUALLY used, not the one asked for.
-    skey=$(klist -e | grep -A1 "MSOLAPSvc.3/${HOST}@" | grep -o 'Etype (skey, tkt): [^,]*' | sed 's/.*: //')
+    # `|| true` matters: the script runs under `set -euo pipefail`, so a klist
+    # whose output does not match (no ticket, changed formatting) would fail the
+    # assignment and exit the script HERE — making the ${skey:-UNKNOWN} fallback
+    # and the MISMATCH branch unreachable in exactly the case they exist for,
+    # and killing the loop before the remaining etypes are measured.
+    skey=$(klist -e | grep -A1 "MSOLAPSvc.3/${HOST}@" | grep -o 'Etype (skey, tkt): [^,]*' | sed 's/.*: //' || true)
     echo "  session key actually used: ${skey:-UNKNOWN}"
     # The literal word MISMATCH is what CI greps for; keep them in step.
     [ "${skey}" = "${e}" ] || echo "  *** MISMATCH: asked for ${e}, got ${skey} -- the row above measures ${skey}"

@@ -38,9 +38,21 @@ inherently safe is the specific mistake this principle exists to prevent.
 ### II. Read-Only by Construction
 
 The extension MUST expose no operation that creates, alters, refreshes or deletes a
-server-side object. This is a property of what the code contains, not of what callers
-choose to call: an operation that could mutate server state MUST NOT exist in the codebase,
-so no configuration, argument or mistake can reach one.
+server-side object. Where the capability can be absent, absence is required: it MUST be a
+property of what the code contains, not of what callers choose to call, so that no
+configuration, argument or mistake can reach one.
+
+**Where absence is not achievable, the weaker guarantee MUST be stated as such.** The XMLA
+`<Statement>` element is the entry point to the entire command surface — MDX writeback, DMX
+and stored-procedure `CALL` all travel through it — so a client that can send a query can
+structurally send those too. That path MUST therefore be guarded by an allowlist of query
+forms, and the documentation MUST NOT present that guard as equivalent to absence, nor as
+sufficient on its own. Granting the connecting account read-only permissions on the server is
+the only control that cannot be reasoned around, and the documentation MUST say so.
+
+This clause was added after the original wording was found to be false in practice: the
+guarantee was claimed uniformly, and the test that appeared to establish it asserted only
+that the emitted envelope lacked four element names that no MDX or DMX mutation contains.
 
 For a DuckDB extension this extends to the catalog surface: the attached catalog MUST
 refuse DDL and DML rather than translating it, and no `COPY TO`, `INSERT`, `UPDATE`,

@@ -82,9 +82,21 @@ int main() {
 		return 2;
 	}
 
+	// atoi truncates silently, and ConnectionTarget refuses a DEFAULT port
+	// precisely because "guessing wrong presents as a hang rather than as an
+	// error". Quietly turning 65538 into port 2 reintroduces exactly that: the
+	// probe would report a connection failure against a port the operator never
+	// named.
+	char *end = nullptr;
+	const unsigned long parsed = std::strtoul(port_s.c_str(), &end, 10);
+	if (end == port_s.c_str() || (end && *end != '\0') || parsed < 1 || parsed > 65535) {
+		std::fprintf(stderr, "XMLA_TEST_PORT must be a number in 1..65535\n");
+		return 2;
+	}
+
 	ConnectionTarget target;
 	target.host = host;
-	target.port = static_cast<uint16_t>(std::atoi(port_s.c_str()));
+	target.port = static_cast<uint16_t>(parsed);
 	target.timeout_seconds = 30.0;
 
 	Credential credential;

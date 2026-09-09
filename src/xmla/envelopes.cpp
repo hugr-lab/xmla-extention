@@ -109,6 +109,128 @@ std::string Discover(const std::string &request_type, const Restrictions &restri
 		   "</PropertyList></Properties></Discover></Body></Envelope>";
 }
 
+//! ASCII-only case fold and classification.
+//!
+//! ::toupper and isalpha follow the global LC_CTYPE, and a DuckDB extension is
+//! loaded into a host process that may well have called setlocale(LC_CTYPE, "")
+//! -- CPython does, and so does R. Under tr_TR.UTF-8, toupper('i') is not 'I',
+//! so a lower-case "with member ... select ..." folds to "WiTH" and a
+//! legitimate query is refused. Keyword syntax here is ASCII by definition, so
+//! the locale has no business in it.
+static char AsciiUpper(char c) {
+	return (c >= 'a' && c <= 'z') ? static_cast<char>(c - 'a' + 'A') : c;
+}
+
+static bool AsciiAlpha(char c) {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+}
+
+static bool AsciiSpace(char c) {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v';
+}
+
+//! Advance past whitespace and comments starting at `i`. Returns false if the
+//! input ends inside an unterminated comment.
+static bool SkipTrivia(const std::string &s, size_t &i) {
+	for (;;) {
+		while (i < s.size() && AsciiSpace(s[i])) {
+			i++;
+		}
+		if (s.compare(i, 2, "//") == 0 || s.compare(i, 2, "--") == 0) {
+			const size_t nl = s.find('\n', i);
+			if (nl == std::string::npos) {
+				i = s.size();
+				return true;
+			}
+			i = nl + 1;
+			continue;
+		}
+		if (s.compare(i, 2, "/*") == 0) {
+			const size_t close = s.find("*/", i + 2);
+			if (close == std::string::npos) {
+				i = s.size();
+				return false;
+			}
+			i = close + 2;
+			continue;
+		}
+		return true;
+	}
+}
+
+//! Refuse a statement separator outside a string or a bracketed identifier.
+//!
+//! Checking only the FIRST keyword is the classic allowlist bypass: SSMS sends
+//! semicolon-separated MDX as a single XMLA Execute/Statement, so
+//! "SELECT {} ON 0 FROM [S]; UPDATE CUBE [S] SET (x) = 0" would satisfy a
+//! first-token check and carry a writeback behind it.
+//!
+//! Whether SSAS executes every statement in such a batch is NOT verified here
+//! and this does not assume an answer. It refuses the shape, which is the
+//! conservative reading and the one consistent with this guard's posture. A
+//! TRAILING separator is allowed because it is idiomatic and carries nothing.
+static void RejectStatementBatch(const std::string &s) {
+	size_t i = 0;
+	while (i < s.size()) {
+		const char c = s[i];
+		if (c == '\'' || c == '"') {
+			// A quoted literal. Doubling the quote escapes it in both MDX and DAX.
+			const char quote = c;
+			i++;
+			while (i < s.size()) {
+				if (s[i] == quote) {
+					if (i + 1 < s.size() && s[i + 1] == quote) {
+						i += 2;
+						continue;
+					}
+					i++;
+					break;
+				}
+				i++;
+			}
+			continue;
+		}
+		if (c == '[') {
+			// A bracketed identifier; "]]" escapes a literal bracket.
+			i++;
+			while (i < s.size()) {
+				if (s[i] == ']') {
+					if (i + 1 < s.size() && s[i + 1] == ']') {
+						i += 2;
+						continue;
+					}
+					i++;
+					break;
+				}
+				i++;
+			}
+			continue;
+		}
+		if (s.compare(i, 2, "//") == 0 || s.compare(i, 2, "--") == 0 || s.compare(i, 2, "/*") == 0) {
+			size_t j = i;
+			SkipTrivia(s, j);
+			// SkipTrivia also eats whitespace, which is harmless here.
+			if (j <= i) {
+				i++;
+			} else {
+				i = j;
+			}
+			continue;
+		}
+		if (c == ';') {
+			size_t j = i + 1;
+			SkipTrivia(s, j);
+			if (j >= s.size()) {
+				return;	 // trailing separator, nothing behind it
+			}
+			throw ProtocolError(
+				"this extension sends a single read-only statement, and this one "
+				"contains a statement separator with further text after it");
+		}
+		i++;
+	}
+}
+
 void RejectIfMutating(const std::string &statement) {
 	// Skip whitespace and comments to find the first significant token. Comments
 	// are skipped rather than rejected because a query may legitimately begin
@@ -159,10 +281,17 @@ void RejectIfMutating(const std::string &statement) {
 	// The complete set of statement forms this extension will send. MDX queries
 	// start SELECT or WITH; DAX queries start EVALUATE, DEFINE or VAR.
 	static const char *const kQueryKeywords[] = {"SELECT", "EVALUATE", "WITH", "DEFINE", "VAR"};
+	bool allowed_keyword = false;
 	for (const char *allowed : kQueryKeywords) {
 		if (keyword == allowed) {
-			return;
+			allowed_keyword = true;
+			break;
 		}
+	}
+	if (allowed_keyword) {
+		// The first token being a query keyword says nothing about the rest.
+		RejectStatementBatch(statement);
+		return;
 	}
 
 	// The statement is NOT echoed back. It is caller text and this message can

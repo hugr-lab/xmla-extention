@@ -1,8 +1,20 @@
 #!/bin/sh
-# roborev post-commit hook v4 - auto-reviews every commit
-ROBOREV="/opt/homebrew/bin/roborev"
-if [ ! -x "$ROBOREV" ]; then
-    ROBOREV=$(command -v roborev 2>/dev/null)
-    [ -z "$ROBOREV" ] || [ ! -x "$ROBOREV" ] && exit 0
+# roborev post-commit — queues the commit for review.
+#
+# Non-blocking: a missing roborev is not an error, and neither is a review that
+# does not enqueue. But FAILURE IS REPORTED. The original hook sent stderr to
+# /dev/null and exited 0 on any problem, so a roborev that was installed but
+# broken looked exactly like one working correctly — which is the same
+# silent-failure mode the leak gate was found in, reintroduced for the review
+# path.
+#
+# No hardcoded Homebrew prefix: this repository's CI covers Linux and macOS, and
+# a path that is meaningful on one machine layout is dead weight everywhere else.
+ROBOREV=$(command -v roborev 2>/dev/null)
+if [ -z "$ROBOREV" ] || [ ! -x "$ROBOREV" ]; then
+    exit 0
 fi
-"$ROBOREV" post-commit 2>/dev/null
+if ! "$ROBOREV" post-commit; then
+    echo "roborev: post-commit hook exited non-zero (review not enqueued)" >&2
+fi
+exit 0

@@ -1,7 +1,14 @@
 # Public API contract
 
-Everything a DuckDB user can reach. Nothing here mutates server state, and nothing here is a
-gate over a mutating capability — the capability does not exist (FR-028).
+Everything a DuckDB user can reach. Nothing here mutates server state, but the guarantee is
+**two-tier** and the tiers are not equally strong:
+
+- The **discovery** surface has no mutating capability at all — no envelope builder exists, so
+  no argument reaches one (FR-028).
+- The **statement** surface *is* a gate. XMLA's `<Statement>` carries the whole command
+  surface, so `xmla_execute` validates against an allowlist and refuses everything else
+  (FR-028a). A gate is weaker than an absence, and FR-028c requires saying so rather than
+  implying otherwise.
 
 ## ATTACH
 

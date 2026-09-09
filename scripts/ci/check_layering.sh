@@ -13,25 +13,41 @@ set -euo pipefail
 
 fail=0
 
-# gss_context.cpp is the ONE file allowed to bind GSSAPI, and it lives in its own
-# CMake target for that reason.
-while IFS= read -r f; do
-    case "$f" in
-        src/xmla/gss_context.cpp) continue ;;
-    esac
-    if grep -nE '#include[[:space:]]*[<"](duckdb|gssapi)' "$f" >/dev/null 2>&1; then
-        echo "layering: $f includes a DuckDB or GSSAPI header" >&2
-        grep -nE '#include[[:space:]]*[<"](duckdb|gssapi)' "$f" | sed 's/^/    /' >&2
-        fail=1
-    fi
-done < <(find src/xmla src/include/xmla -name '*.cpp' -o -name '*.hpp')
+# The security dependency does not only arrive as <gssapi/...>. krb5.h and
+# com_err.h are the other doors into the same library, so "free of GSSAPI" has
+# to name them too or it is narrower than it claims.
+security_pattern='#include[[:space:]]*[<"](gssapi|krb5|com_err)'
+duckdb_pattern='#include[[:space:]]*[<"]duckdb'
+
+# ONE find, captured once, so the set that is scanned and the set that is counted
+# cannot diverge.
+files=$(find src/xmla src/include/xmla \( -name '*.cpp' -o -name '*.hpp' \) -print)
 
 # A file list that came back empty is a broken check, not a pass.
-count=$(find src/xmla src/include/xmla -name '*.cpp' -o -name '*.hpp' | grep -c '' || true)
+count=$(printf '%s\n' "$files" | grep -c '[^[:space:]]' || true)
 if [ "$count" -eq 0 ]; then
     echo "layering: scanned 0 files -- the check is broken, which is not a pass" >&2
     exit 1
 fi
+
+while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    # gss_context.cpp is the ONE file allowed to bind GSSAPI, and it lives in its
+    # own CMake target for that reason. The exemption covers the SECURITY half
+    # only -- it is not a licence to include DuckDB there.
+    if [ "$f" != "src/xmla/gss_context.cpp" ]; then
+        if grep -nE "$security_pattern" "$f" >/dev/null 2>&1; then
+            echo "layering: $f includes a GSSAPI/krb5 header" >&2
+            grep -nE "$security_pattern" "$f" | sed 's/^/    /' >&2
+            fail=1
+        fi
+    fi
+    if grep -nE "$duckdb_pattern" "$f" >/dev/null 2>&1; then
+        echo "layering: $f includes a DuckDB header" >&2
+        grep -nE "$duckdb_pattern" "$f" | sed 's/^/    /' >&2
+        fail=1
+    fi
+done < <(printf '%s\n' "$files")
 
 if [ "$fail" != 0 ]; then
     echo "" >&2
@@ -39,4 +55,4 @@ if [ "$fail" != 0 ]; then
     echo "src/xmla/gss_context.cpp, or above the protocol layer entirely." >&2
     exit 1
 fi
-echo "layering: $count protocol files, none including DuckDB or GSSAPI"
+echo "layering: $count protocol files, none including DuckDB, GSSAPI, krb5 or com_err"

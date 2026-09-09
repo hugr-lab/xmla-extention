@@ -2,12 +2,15 @@
 
 #include "xmla/errors.hpp"
 
+#include <fcntl.h>
 #include <netdb.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <sys/types.h>
 #include <unistd.h>
 #include <cerrno>
+#include <chrono>
 #include <cstring>
 
 namespace xmla {
@@ -33,16 +36,74 @@ SocketChannel::SocketChannel(const std::string &host, uint16_t port, double time
 	tv.tv_sec = static_cast<time_t>(timeout_seconds);
 	tv.tv_usec = static_cast<suseconds_t>((timeout_seconds - static_cast<double>(tv.tv_sec)) * 1e6);
 
+	// SO_SNDTIMEO does NOT bound connect() on a blocking socket, on Linux or on
+	// the BSDs -- it applies to send operations only. An earlier version of this
+	// code set both timeouts here and claimed in a comment that this covered
+	// "a connect to a filtered port", which is precisely the case it did not
+	// cover: connect() on a blocking fd runs to the kernel's SYN-retry limit
+	// (~130 s on Linux with tcp_syn_retries=6) regardless, and with AF_UNSPEC
+	// and a dual-stack name that cost is paid PER ADDRESS. FR-025 admits no
+	// unbounded wait, so the connect is made non-blocking and bounded explicitly.
+	//
+	// The deadline is shared across addresses rather than restarted for each, so
+	// a name resolving to several unreachable addresses still returns within the
+	// caller's timeout instead of a multiple of it.
+	const auto deadline =
+		std::chrono::steady_clock::now() + std::chrono::milliseconds(static_cast<long long>(timeout_seconds * 1000.0));
+
 	for (struct addrinfo *ai = result; ai != nullptr; ai = ai->ai_next) {
 		const int fd = ::socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
 		if (fd < 0) {
 			continue;
 		}
-		// Both directions, before connect: FR-025 admits no unbounded wait, and a
-		// connect to a filtered port is exactly where one would occur.
+		// For the send/recv that follow once the connection is up.
 		::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 		::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
+		const int flags = ::fcntl(fd, F_GETFL, 0);
+		if (flags < 0 || ::fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+			::close(fd);
+			continue;
+		}
+
+		bool connected = false;
 		if (::connect(fd, ai->ai_addr, ai->ai_addrlen) == 0) {
+			connected = true;
+		} else if (errno == EINPROGRESS) {
+			for (;;) {
+				const auto now = std::chrono::steady_clock::now();
+				if (now >= deadline) {
+					break;
+				}
+				const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count();
+				struct pollfd pfd;
+				pfd.fd = fd;
+				pfd.events = POLLOUT;
+				pfd.revents = 0;
+				const int ready = ::poll(&pfd, 1, static_cast<int>(remaining));
+				if (ready < 0) {
+					if (errno == EINTR) {
+						continue;  // a signal, not a decision
+					}
+					break;
+				}
+				if (ready == 0) {
+					break;	// the deadline expired
+				}
+				// poll() reporting writable does NOT mean the connect succeeded;
+				// a refused connection is also writable. SO_ERROR is the answer.
+				int err = 0;
+				socklen_t len = sizeof(err);
+				if (::getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &len) == 0 && err == 0) {
+					connected = true;
+				}
+				break;
+			}
+		}
+
+		if (connected) {
+			// Back to blocking, so SO_RCVTIMEO/SO_SNDTIMEO govern the session.
+			::fcntl(fd, F_SETFL, flags);
 			fd_ = fd;
 			break;
 		}
