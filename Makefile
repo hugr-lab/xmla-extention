@@ -7,7 +7,12 @@ EXT_CONFIG=${PROJ_DIR}extension_config.cmake
 # matrix targets the community-extension CI drives.
 include extension-ci-tools/makefiles/duckdb_extension.Makefile
 
-.PHONY: test-protocol check format format-check
+.PHONY: test-protocol check format format-check probe
+
+# Run the spike against a live instance, in a Linux container. Needs XMLA_HOST;
+# see "Running the probe against a live instance" in README.md.
+probe:
+	./scripts/run-probe.sh
 
 # CI pins clang-format-14, and newer versions disagree with it — a local
 # clang-format 23 reformatted two files in a way 14 rejected, which is only
