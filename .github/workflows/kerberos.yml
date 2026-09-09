@@ -137,6 +137,13 @@ jobs:
               echo "a wrap_iov round-trip reported $marker"; exit 1
             fi
           done
+          # Absence is not evidence: NOT-ENCRYPTED is legitimately never emitted
+          # for the 1-byte row, so "no marker" no longer distinguishes encrypted
+          # from not-measured. conf_state is the mechanism's own answer, is
+          # asserted at every size, and says so when it is 0.
+          if grep -q "conf_state=0" out.txt; then
+            echo "the mechanism reported it did not encrypt"; exit 1
+          fi
           if grep -q "PADDING seen: \*\*\*" out.txt; then
             echo "an enctype now pads - the frame has no field for it, see research D5"; exit 1
           fi

@@ -244,7 +244,13 @@ echo "submodules:"
 # whether or not the gate skips gitlinks at all — the first version of this
 # fixture did exactly that and could not fail.
 absent_sha=0123456789abcdef0123456789abcdef01234567
-git -C "$SANDBOX" update-index --add --cacheinfo "160000,$absent_sha,vendored" 2>/dev/null
+# Checked: if update-index ever fails (a git version that validates the object,
+# a verify_path rejection) the index stays empty, the gate exits 0 on an empty
+# list, and the case reports ok having tested nothing.
+if ! git -C "$SANDBOX" update-index --add --cacheinfo "160000,$absent_sha,vendored" 2>/dev/null; then
+    echo "  FAIL  could not create the gitlink fixture; the submodule case tested nothing"
+    fail=$((fail + 1))
+fi
 run_gate
 report "a submodule gitlink is skipped, not refused as unreadable" "$gate_verdict" "PASS"
 git -C "$SANDBOX" update-index --force-remove vendored 2>/dev/null
@@ -267,7 +273,14 @@ after=$(find "$priv" -maxdepth 1 -name 'tmp.*' 2>/dev/null | grep -c '' || true)
 rm -rf "$priv"
 git -C "$SANDBOX" rm -q --cached h1.md h2.md h3.md >/dev/null 2>&1
 rm -f "$SANDBOX"/h*.md
-if [ "$after" -le "$before" ]; then
+# The verdict is asserted too. `before` is 0 by construction (a fresh mktemp -d),
+# so `after -le before` reduces to `after == 0` — which is ALSO what a gate that
+# aborted before creating scan_dir produces. Without this the case printed "ok"
+# for a gate that did nothing, the very failure mode this suite rejects.
+if [ "$gate_verdict" != "PASS" ]; then
+    echo "  FAIL  the hygiene run did not pass, so 'no leaked directory' proves nothing"
+    fail=$((fail + 1))
+elif [ "$after" -le "$before" ]; then
     echo "  ok    the scan directory is cleaned up"
     pass=$((pass + 1))
 else

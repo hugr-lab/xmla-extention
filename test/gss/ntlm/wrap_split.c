@@ -86,7 +86,13 @@ int main(void) {
 		size_t overhead = out.length - plen;
 		/* Same reasoning as the Kerberos probe: for a 1-byte payload this is a
 		 * 1-in-256 coin flip, not a measurement. Only assert it from 8 bytes up. */
-		int ct_checked = (plen >= 8);
+		/* conf is gss_wrap's own conf_state — deterministic, size-independent,
+		 * and the actual evidence of confidentiality. */
+		if (!conf) {
+			printf("*** conf_state=0: the mechanism reports it did NOT encrypt\n");
+			ok = 0;
+		}
+		int ct_checked = (plen >= 3);
 		int tail_is_ct = !ct_checked || memcmp((char *)out.value + overhead, plain, plen) != 0;
 		printf("plain=%-5zu wrapped=%-5zu overhead=%-3zu conf=%d  tail!=plain:%s  head: %02x %02x %02x %02x\n",
 		       plen, (size_t)out.length, overhead, conf, ct_checked ? (tail_is_ct ? "yes" : "NO") : "n/a",

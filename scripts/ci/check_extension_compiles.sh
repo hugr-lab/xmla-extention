@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# Syntax-check the DuckDB-facing sources against DuckDB's headers.
+#
+# These files compile ONLY inside the DuckDB build (the extension block in
+# CMakeLists.txt is guarded on `if(COMMAND build_loadable_extension)`), and no CI
+# job runs that build: the unit-test and sanitizer jobs build standalone, and so
+# does CodeQL. So a syntax error, a wrong override signature, or a missing
+# include in src/xmla_extension.cpp failed nothing anywhere — it would surface
+# for the first time in a release build, or in a contributor's `make release`.
+#
+# A full DuckDB build takes ~10 minutes and needs a lot of memory. A syntax-only
+# compile needs the submodule CHECKED OUT but not built, and takes seconds. It
+# catches the class of error that can reach here.
+set -euo pipefail
+
+cd "$(dirname "$0")/../.."
+
+if [ ! -f duckdb/src/include/duckdb.hpp ]; then
+    echo "extension-compile: the duckdb submodule is not checked out" >&2
+    echo "  run: git submodule update --init --recursive" >&2
+    exit 1
+fi
+
+# Discovered, not listed: a new DuckDB-facing file is covered the moment it lands.
+files=$(find src -maxdepth 1 -name '*.cpp' -print)
+count=$(printf '%s\n' "$files" | grep -c '[^[:space:]]' || true)
+if [ "$count" -eq 0 ]; then
+    echo "extension-compile: found 0 sources -- the check is broken, which is not a pass" >&2
+    exit 1
+fi
+
+CXX="${CXX:-c++}"
+fail=0
+while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    if ! "$CXX" -std=c++17 -fsyntax-only -Isrc/include -Iduckdb/src/include "$f"; then
+        echo "extension-compile: $f does not compile against DuckDB's headers" >&2
+        fail=1
+    fi
+done < <(printf '%s\n' "$files")
+
+[ "$fail" = 0 ] || exit 1
+echo "extension-compile: $count DuckDB-facing file(s) compile"

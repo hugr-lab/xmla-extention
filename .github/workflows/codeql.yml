@@ -34,7 +34,10 @@ jobs:
           languages: c-cpp
           queries: security-and-quality
 
-      - run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
+      # -DXMLA_BUILD_TESTS=OFF keeps test/cpp out of the database. The exclusion
+      # is requested HERE rather than imposed in CMakeLists.txt, where it broke
+      # `ctest` and the README's build-then-run instructions for everyone else.
+      - run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DXMLA_BUILD_TESTS=OFF
 
       # Build ONLY the shipped targets. For a compiled language CodeQL analyses
       # exactly what the build compiles, so this — not paths-ignore — is how test

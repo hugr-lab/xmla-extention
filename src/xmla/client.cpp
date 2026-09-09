@@ -7,7 +7,6 @@
 #include "xmla/sealing.hpp"
 
 #include <algorithm>
-#include <cctype>
 
 namespace xmla {
 

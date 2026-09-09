@@ -257,7 +257,15 @@ void RejectIfMutating(const std::string &statement) {
 	// to the point, from being ACCEPTED if the allowlist were applied to the raw
 	// first characters.
 	size_t i = 0;
-	SkipTrivia(statement, i);
+	if (!SkipTrivia(statement, i)) {
+		// The statement is refused either way — i lands at s.size(), the keyword
+		// comes out empty — but with the generic "does not begin with SELECT..."
+		// message, which sends the reader looking for a keyword that is not the
+		// problem.
+		throw ProtocolError(
+			"this extension sends a single read-only statement, and this one "
+			"contains an unterminated block comment");
+	}
 
 	size_t end = i;
 	while (end < statement.size() && (AsciiAlpha(statement[end]) || statement[end] == '_')) {

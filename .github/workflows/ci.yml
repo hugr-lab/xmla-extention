@@ -23,9 +23,13 @@ jobs:
   lint:
     name: Lint
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
+        with:
+          # For the extension syntax check below: it needs DuckDB's headers
+          # CHECKED OUT, not built.
+          submodules: recursive
 
       - name: clang-format
         run: |
@@ -72,6 +76,13 @@ jobs:
       - name: The wire path does not depend on the process locale
         run: scripts/ci/check_locale_independence.sh
 
+      # src/xmla_extension.cpp compiles ONLY inside the DuckDB build, which no
+      # other job runs — unit tests, sanitizers and CodeQL all build standalone.
+      # A syntax error there failed nothing anywhere. This needs the submodule
+      # checked out but not built, and takes seconds.
+      - name: The DuckDB-facing sources compile against DuckDB's headers
+        run: scripts/ci/check_extension_compiles.sh
+
   cpp-unit-tests:
     name: C++ Unit Tests (${{ matrix.os.id }})
     runs-on: ${{ matrix.os.runner }}
@@ -108,10 +119,13 @@ jobs:
         run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
              -DXMLA_REQUIRE_GSS=${{ matrix.os.require_gss }}
 
+      # The DEFAULT target too, not just the tests. `--target xmla_test` alone
+      # builds only xmla_test and xmla_protocol — so xmla_gss and xmla_probe were
+      # compiled by NO ci job, and a compile or link error in gss_context.cpp
+      # failed nothing here. That is the whole reason the linux leg configures
+      # with -DXMLA_REQUIRE_GSS=ON.
       - name: Build
-        # xmla_test is EXCLUDE_FROM_ALL so that CodeQL's default-target build
-        # analyses only shipped code; the test jobs ask for it by name.
-        run: cmake --build build --target xmla_test
+        run: cmake --build build
 
       # Constitution III: the suite must pass on a machine that has never
       # contacted an Analysis Services instance. Nothing here reaches a network.
@@ -131,5 +145,5 @@ jobs:
       # the code that most needs it.
       - run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
              -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
-      - run: cmake --build build --target xmla_test
+      - run: cmake --build build
       - run: ./build/xmla_test

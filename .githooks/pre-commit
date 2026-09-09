@@ -115,7 +115,11 @@ while IFS= read -r -d '' f; do
     # Mode 160000 in the index is a gitlink. `git cat-file -t ":$f"` does NOT
     # report "commit" for one -- it fails outright with "could not get object
     # info" -- so the mode is the only reliable signal.
-    case "$(git ls-files -s -- "$f" 2>/dev/null)" in
+    # --literal-pathspecs: without it $f is a PATHSPEC and is glob-interpreted, so
+    # a staged path containing * ? or [ queries whatever the glob matches rather
+    # than the entry it names. If that first match is a gitlink, a real blob is
+    # skipped unscanned.
+    case "$(git --literal-pathspecs ls-files -s -- "$f" 2>/dev/null)" in
       160000\ *) continue ;;
     esac
 

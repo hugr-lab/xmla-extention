@@ -138,7 +138,9 @@ Context requested `mutual | replay | sequence | conf | integ`, matching ADOMD's
 enctype it actually used.
 
 **Result**: `gss_wrap_iov` with `HEADER | DATA | PADDING | TRAILER` succeeds for every AES
-enctype, keeps DATA at plaintext length, encrypts in place, and round-trips.
+enctype, keeps DATA at plaintext length, and round-trips. Confidentiality is taken from the
+mechanism's own `conf_state`, which is asserted at every size; the byte-comparison
+cross-check is applied from 3 bytes up (see the method note below).
 
 | session-key enctype | HEADER | TRAILER | token = H+T | PADDING |
 |---|---|---|---|---|
@@ -150,12 +152,16 @@ enctype, keeps DATA at plaintext length, encrypts in place, and round-trips.
 Measured at payloads of 1, 3, 60, 563, 2888, 4096 and 65000 bytes; DATA was length-preserving
 at every size and PADDING was zero at every size.
 
-**A note on the method**: the probes assert "the ciphertext differs from the plaintext" only
-from 8 bytes up. Below that it is a coin flip rather than a measurement — a 1-byte ciphertext
-coincides with its plaintext once in 256 runs, and it duly did in CI, reporting
-`NOT-ENCRYPTED` for aes128-cts-hmac-sha1-96 and failing the job. The small sizes still assert
-length-preservation and the round-trip, which are deterministic and are what the frame
-actually depends on.
+**A note on the method**: confidentiality is asserted from `conf_state`, the mechanism's own
+report, at every size — it is deterministic and size-independent. It was being computed and
+discarded while a byte-comparison stood in for it.
+
+That byte comparison ("the ciphertext differs from the plaintext") is kept as a cross-check
+but only from 3 bytes up. At 1 byte it is a coin flip rather than a measurement: the
+ciphertext coincides with its plaintext once in 256 runs, and it duly did in CI, reporting
+`NOT-ENCRYPTED` for aes128-cts-hmac-sha1-96 and failing the job. At 3 bytes the odds are
+2⁻²⁴, comparable to the KDC container's own flake rate, so excluding more than the 1-byte row
+would discard real measurement to buy nothing.
 
 **Three findings**:
 

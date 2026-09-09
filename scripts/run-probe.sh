@@ -66,8 +66,12 @@ plugin_is_signed() {
         info=$(codesign -dvvv "$plugin" 2>&1 || true)
         case "$info" in
             *"TeamIdentifier=UPBK2H6LZM"*) return 0 ;;
-            *) return 1 ;;
         esac
+        # Keep looking. Returning here decided the answer from the FIRST layout
+        # that happens to exist, and this script is written for the case where
+        # BOTH layouts are present — so an ad-hoc plugin sitting in the path
+        # checked first would condemn an install whose signed plugin is in the
+        # other.
     done
     return 1
 }
@@ -106,11 +110,18 @@ printf 'runtime: %s (%s)\n' "$RUNTIME" "$("$RUNTIME" --version 2>&1 | head -1)"
 # an opaque XPC error that reads like a broken install.
 # ---------------------------------------------------------------------------
 if [ "$APPLE" = "1" ]; then
-    if ! "$RUNTIME" system status >/dev/null 2>&1 \
-       || "$RUNTIME" system status 2>&1 | grep -qi "not running"; then
-        echo "starting the container system service"
-        "$RUNTIME" system start
-    fi
+    # Capture, then match — the same trap this script fixes above for codesign,
+    # and it was reintroduced here. `... | grep -qi "not running"` has grep exit
+    # at the first match while `container` is still writing, `container` takes
+    # SIGPIPE, and `set -o pipefail` reports the pipeline as failed. The `||`
+    # then reads that as "the daemon is fine" and skips the start.
+    daemon_status=$("$RUNTIME" system status 2>&1 || true)
+    case "$daemon_status" in
+        *"not running"*|*"not registered"*|*"Connection invalid"*|*"XPC"*)
+            echo "starting the container system service"
+            "$RUNTIME" system start
+            ;;
+    esac
 fi
 
 echo "building $IMAGE"
@@ -123,20 +134,33 @@ fi
 # A previous run left behind is a confusing failure; remove it quietly.
 "$RUNTIME" rm "$NAME" >/dev/null 2>&1 || true
 
-# Environment is passed with -e so no value reaches the process list of another
-# user, and none of it is echoed here.
-set -- \
-    -e "XMLA_TEST_HOST=$XMLA_HOST" \
-    -e "XMLA_TEST_PORT=$XMLA_PORT" \
-    -e "XMLA_TEST_MECHANISM=$XMLA_MECHANISM"
-[ -n "${XMLA_USER:-}" ]     && set -- "$@" -e "XMLA_TEST_USER=$XMLA_USER"
-[ -n "${XMLA_PASSWORD:-}" ] && set -- "$@" -e "XMLA_TEST_PASSWORD=$XMLA_PASSWORD"
-[ -n "${XMLA_CATALOG:-}" ]  && set -- "$@" -e "XMLA_TEST_CATALOG=$XMLA_CATALOG"
-[ -n "${XMLA_SPN:-}" ]      && set -- "$@" -e "XMLA_TEST_SPN=$XMLA_SPN"
+# --env-file, NOT -e.
+#
+# An earlier version passed these with `-e KEY=VALUE` and claimed that kept them
+# out of another user's view. It does the opposite: -e puts the value in the
+# `docker run` / `container run` ARGV, and /proc/<pid>/cmdline is world-readable
+# on Linux — so the password and the instance address were visible to every
+# local user for the life of the run. A 0600 file read by the runtime is not.
+ENV_FILE=$(mktemp)
+chmod 600 "$ENV_FILE"
+cleanup() { rm -f "$ENV_FILE"; }
+trap cleanup EXIT
+
+{
+    printf 'XMLA_TEST_HOST=%s\n' "$XMLA_HOST"
+    printf 'XMLA_TEST_PORT=%s\n' "$XMLA_PORT"
+    printf 'XMLA_TEST_MECHANISM=%s\n' "$XMLA_MECHANISM"
+    [ -n "${XMLA_USER:-}" ]     && printf 'XMLA_TEST_USER=%s\n' "$XMLA_USER"
+    [ -n "${XMLA_PASSWORD:-}" ] && printf 'XMLA_TEST_PASSWORD=%s\n' "$XMLA_PASSWORD"
+    [ -n "${XMLA_CATALOG:-}" ]  && printf 'XMLA_TEST_CATALOG=%s\n' "$XMLA_CATALOG"
+    [ -n "${XMLA_SPN:-}" ]      && printf 'XMLA_TEST_SPN=%s\n' "$XMLA_SPN"
+    true
+} > "$ENV_FILE"
 
 echo "running the probe (mechanism: $XMLA_MECHANISM)"
+# Not `exec`: the trap has to run so the credential file is removed.
 if [ "$APPLE" = "1" ]; then
-    exec "$RUNTIME" run --rm --name "$NAME" "$@" "$IMAGE"
+    "$RUNTIME" run --rm --name "$NAME" --env-file "$ENV_FILE" "$IMAGE"
 else
-    exec "$RUNTIME" run --rm --platform linux/amd64 --name "$NAME" "$@" "$IMAGE"
+    "$RUNTIME" run --rm --platform linux/amd64 --name "$NAME" --env-file "$ENV_FILE" "$IMAGE"
 fi
