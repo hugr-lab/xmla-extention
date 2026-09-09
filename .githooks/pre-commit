@@ -107,8 +107,20 @@ while IFS= read -r -d '' f; do
     scan_target="$f"
     [ -f "$scan_target" ] || continue
   else
+    # A SUBMODULE is a gitlink (mode 160000): the index entry is a commit id, not
+    # a blob, so there is no content in THIS repository to scan. Skipping it is
+    # correct and is checked explicitly by object type -- not folded into a
+    # blanket failure handler, which is what previously hid real read errors.
+    # The submodule's own contents are governed by its own repository.
+    # Mode 160000 in the index is a gitlink. `git cat-file -t ":$f"` does NOT
+    # report "commit" for one -- it fails outright with "could not get object
+    # info" -- so the mode is the only reliable signal.
+    case "$(git ls-files -s -- "$f" 2>/dev/null)" in
+      160000\ *) continue ;;
+    esac
+
     scan_target="$scan_dir/blob"
-    # A cat-file failure is an ERROR, not a skip.
+    # Any OTHER cat-file failure is an ERROR, not a skip.
     #
     # This used to `|| continue`, described as covering "staged as a deletion, or
     # unmerged" -- but --diff-filter=ACMRT excludes D and U, so neither can reach
