@@ -1,0 +1,22 @@
+# Binary files the leak gate cannot scan, reviewed by eye and recorded here.
+#
+# The gate refuses binaries by default because grep -I skips them, so it would
+# otherwise report CLEAN on a file it never read -- which is exactly how a
+# coverage database carrying absolute home-directory paths reached a public repo.
+#
+# FORMAT: one entry per line, `<sha256>  <path>` -- two spaces, and the path
+# exactly as `git ls-files` prints it (no `./` prefix, no trailing whitespace).
+# The comparison is a byte-exact whole-line match, so anything else is silently
+# not an entry. The gate prints the exact line to paste when it refuses a file.
+#
+# The digest is the point, not decoration. A path-only entry would grant that
+# path permanent immunity, so replacing `screenshot.png` with a re-capture that
+# now shows a hostname in the URL bar would pass unreviewed. Keying on content
+# means any replacement re-arms the gate and has to be reviewed again.
+#
+# Adding a line here is a statement that a human looked at THIS content. For a UI
+# screenshot that means checking for a hostname or address in a URL bar, a
+# connection panel, a tooltip or a breadcrumb.
+#
+
+# (no reviewed binaries in this repository yet)

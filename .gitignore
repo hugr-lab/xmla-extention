@@ -1,0 +1,26 @@
+# Build output
+build/
+cmake-build-*/
+*.duckdb_extension
+*.o
+*.a
+*.so
+*.dylib
+
+# Dependencies fetched at build time
+vcpkg/
+vcpkg_installed/
+
+# Local configuration that carries a real host, account or ticket.
+# Constitution I: these MUST reach the code from the environment, never a
+# committed file. The .example file is the committed one and carries lookups.
+.env
+.env.local
+*.keytab
+*.ccache
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+compile_commands.json
