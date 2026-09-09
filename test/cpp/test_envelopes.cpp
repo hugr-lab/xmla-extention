@@ -4,6 +4,7 @@
 #include "xmla/rowset.hpp"
 
 #include <clocale>
+#include <cstdio>
 #include <string>
 
 using namespace xmla;
@@ -178,10 +179,21 @@ TEST_CASE("the allowlist does not depend on the process locale") {
 	// is not 'I', so "with"/"define" would fold to "WiTH"/"DEFiNE" and a valid
 	// query would be refused. Keyword syntax is ASCII by definition.
 	const char *previous = setlocale(LC_CTYPE, nullptr);
-	std::string saved = previous ? previous : "C";
-	// Best effort: if the locale is unavailable on this machine the test still
-	// exercises the ASCII path, it just cannot demonstrate the difference.
-	setlocale(LC_CTYPE, "tr_TR.UTF-8");
+	const std::string saved = previous ? previous : "C";
+
+	// tr_TR.UTF-8 is not installed everywhere. When it is missing this case
+	// cannot demonstrate anything, and SAYING so matters: an earlier version
+	// swallowed the failure and passed while the fix it was written for had
+	// silently not applied at all — the locale-bound calls were still there and
+	// the ASCII helpers had no call sites. CodeQL found that, as "unused static
+	// function"; this test did not.
+	//
+	// scripts/ci/check_locale_independence.sh is the deterministic guard. This
+	// case is the demonstration, and it is honest about when it cannot give one.
+	const bool switched = setlocale(LC_CTYPE, "tr_TR.UTF-8") != nullptr;
+	if (!switched) {
+		std::printf("        [tr_TR.UTF-8 unavailable; asserting the ASCII path only]\n");
+	}
 	const std::string env = Execute("with member [M] as 1 select {} on 0 from [S]", "", "");
 	REQUIRE(Has(env, "<Statement>"));
 	Execute("define var x = 1 evaluate ROW(\"a\", x)", "", "");

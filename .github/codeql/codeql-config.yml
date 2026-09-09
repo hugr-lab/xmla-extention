@@ -1,0 +1,18 @@
+name: xmla CodeQL config
+
+# test/cpp is excluded from analysis, and ONLY test/cpp.
+#
+# Every TEST_CASE expands to a `static void` registered through a function
+# pointer held by a static Registrar. CodeQL cannot see through that, so it
+# reports each one as "unused static function" — 40-odd findings that will never
+# be actionable, on a first PR, which is exactly how a scanner gets ignored.
+#
+# src/ and tools/ stay fully analysed, and that is deliberate rather than
+# incidental: the same query found a REAL defect there on the first run. Two
+# ASCII helpers had no call sites, because an edit meant to remove
+# locale-dependent ctype calls silently failed to apply after the file was
+# reformatted. The tests could not catch it (the locale they need is not
+# installed everywhere) and the build was clean. Dropping the query repo-wide to
+# quiet the test noise would have thrown that away.
+paths-ignore:
+  - test/cpp

@@ -63,6 +63,12 @@ jobs:
       - name: The protocol layer stays free of DuckDB and of GSSAPI
         run: scripts/ci/check_layering.sh
 
+      # A source edit meant to remove locale-dependent ctype calls silently did
+      # not apply, and neither the build nor the tests noticed. This is the
+      # deterministic guard for that.
+      - name: The wire path does not depend on the process locale
+        run: scripts/ci/check_locale_independence.sh
+
   cpp-unit-tests:
     name: C++ Unit Tests (${{ matrix.os.id }})
     runs-on: ${{ matrix.os.runner }}
