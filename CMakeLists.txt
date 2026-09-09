@@ -103,6 +103,8 @@ set(XMLA_PROTOCOL_SOURCES
     src/xmla/rowset.cpp
     src/xmla/envelopes.cpp
     src/xmla/redact.cpp
+    src/xmla/auth.cpp
+    src/xmla/client.cpp
 )
 
 add_library(xmla_protocol STATIC ${XMLA_PROTOCOL_SOURCES})
