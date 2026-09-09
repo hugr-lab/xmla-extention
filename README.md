@@ -126,6 +126,70 @@ make check
 container). Newer versions disagree with it, so formatting with whatever is on
 your machine can produce a diff that only fails once pushed.
 
+## Running the probe against a live instance
+
+The spike connects, negotiates, authenticates, seals a `Discover` and prints the
+rows. It is the milestone the DuckDB surface is built on, and the quickest way to
+tell whether an instance is reachable and the credential works.
+
+It must run on **Linux**: the NTLM path needs `gss-ntlmssp`, and macOS has no NTLM
+GSS mechanism at all. `scripts/run-probe.sh` handles that with a container —
+Apple's `container` runtime on macOS, Docker elsewhere.
+
+```bash
+export XMLA_HOST=<address of your instance>     # required
+export XMLA_PORT=2383                           # pinned; there is no redirector
+export XMLA_MECHANISM=ntlm                      # ntlm | kerberos | negotiate
+export XMLA_USER='<principal>'                  # omit to use the ambient identity
+export XMLA_PASSWORD='<password>'               # standalone NTLM only
+export XMLA_CATALOG='<catalog>'                 # optional; adds TABLES/COLUMNS
+
+./scripts/run-probe.sh
+```
+
+`XMLA_HOST` is a variable and is never stored. On a fixture it changes on every
+restore, and a stale copy reads as a firewall or code fault rather than as stale
+config — a mis-diagnosis that costs more than looking it up. Nothing identifying
+belongs in a committed file; the leak gate enforces that, and it is right to.
+
+Expected output ends with `PROBE OK` and a row count. Values are **scrubbed**:
+`DISCOVER_DATASOURCES` returns the instance's own `MACHINE\INSTANCE` name, so it
+prints as `<HOST>\TAB`.
+
+### Notes on Apple `container`
+
+The script deals with two traps so you do not have to, but they are worth knowing
+because they bite everything else on the machine too.
+
+**It picks the signed binary, not the one on `PATH`.** Apple's `container`
+network plugin needs `com.apple.security.virtualization`, a *restricted*
+entitlement macOS grants only to a signature chaining to a certificate Apple
+authorised for it. A Homebrew bottle is rebuilt and **ad-hoc signed**: it declares
+the entitlement and is not granted it. The symptom is not an error — containers
+start, get a DHCP lease, and pass no traffic. If both installs are present,
+Homebrew's usually wins `PATH`. Check with:
+
+```bash
+codesign -dvvv "$(dirname "$(dirname "$(command -v container)")")"/libexec/container/plugins/container-network-vmnet/bin/container-network-vmnet 2>&1 | grep TeamIdentifier
+# TeamIdentifier=UPBK2H6LZM   <- Apple's signed .pkg, good
+# TeamIdentifier=not set      <- Homebrew bottle, networking will not work
+```
+
+Install Apple's signed package from the GitHub release if you only have the
+Homebrew one:
+
+```bash
+sudo installer -pkg container-<ver>-installer-signed.pkg -target /
+```
+
+**The daemon is not running after a reboot.** Every subcommand then fails with an
+opaque XPC error that reads like a broken install. The script starts it; by hand
+it is `container system start`.
+
+The probe only connects **outward**, so no port is published and the container IP
+never matters — which is just as well, since that IP is not routable from the
+macOS host and changes across restarts.
+
 ## Documentation
 
 - [ARCHITECTURE.md](ARCHITECTURE.md) — the layer stack, how messages get split, current status

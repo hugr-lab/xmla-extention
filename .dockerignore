@@ -1,0 +1,5 @@
+# The DuckDB submodule is ~500 MB and the probe image does not build against it.
+duckdb/
+extension-ci-tools/
+build/
+.git/
