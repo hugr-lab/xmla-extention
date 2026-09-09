@@ -246,3 +246,39 @@ principal, the realm, the target service and often the machine name; a committed
 would be a disclosure that merely looks like an opaque blob, and no scrubber can reliably
 redact arbitrary token structure. Captures of *post*-authentication traffic are permitted and
 are scrubbed.
+
+---
+
+## D11 — macOS needs MIT krb5; Apple's GSS.framework cannot seal
+
+**Status**: settled by inspection of the macOS SDK and the shipped framework binary, 2026-09-09.
+
+The plan assumed macOS "is expected to work through the system GSS framework". It does not.
+
+`GSS.framework`'s headers declare the IOV machinery — `gss_iov_buffer_desc`,
+`GSS_IOV_BUFFER_TYPE_HEADER` and the rest — which makes the framework look capable at a
+glance. But:
+
+    $ nm -gU /System/Library/Frameworks/GSS.framework/GSS | grep -i wrap_iov
+    (nothing)
+    $ nm -gU /System/Library/Frameworks/GSS.framework/GSS | grep -ci ntlm
+    0
+
+There is no `gss_wrap_iov`, no `gss_unwrap_iov`, and no NTLM mechanism. The SDK also has no
+`gssapi/gssapi_ext.h`, so code using the IOV API does not even compile against it.
+
+Both seal providers are therefore unavailable on the framework: D5's needs `gss_wrap_iov`,
+and D4's needs an NTLM mechanism to produce the `token || ciphertext` layout that makes the
+length-delta split valid. A macOS build against the framework would configure, compile most
+of the way, and then be unable to seal a single message.
+
+**Decision**: macOS requires MIT krb5 (`brew install krb5`) discovered through pkg-config. The
+framework is detected only so the configure-time failure can say why it was refused and what
+to install. Accepting it would convert a build-time failure into a runtime one, which is
+strictly worse.
+
+**Consequence for the plan**: the macOS CI job is a *hermetic protocol test* job, not a client
+build. That still serves its purpose — catching BSD/Linux socket divergence in `transport` —
+because the protocol layer links no security library at all. `-DXMLA_REQUIRE_GSS=OFF` builds
+exactly that target set, and constitution III already requires the suite to pass on a machine
+that has never contacted an instance; it now also passes on one that has never had Kerberos.

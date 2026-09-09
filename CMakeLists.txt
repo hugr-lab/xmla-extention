@@ -17,33 +17,78 @@ endif()
 include_directories(src/include)
 
 # =============================================================================
-# GSSAPI. The ONLY native dependency.
+# GSSAPI. The ONLY native dependency, and it is needed by exactly one file.
 #
 # Sealing is done by the negotiated security context, not by TLS, so there is no
 # OpenSSL here and none may be added for that purpose (constitution:
 # Security & Data-Handling Constraints).
 #
-# Discovery fails HARD when absent. The neighbouring mssql extension makes
-# Kerberos optional because it also offers SQL authentication; here there is no
-# unauthenticated path to fall back to, so a missing GSSAPI is a broken build
-# rather than a reduced one.
+# macOS is not simply "GSS.framework". Apple's framework DECLARES the IOV types
+# and constants but exports neither gss_wrap_iov nor gss_unwrap_iov, and ships no
+# NTLM mechanism -- verified by inspecting the SDK headers and `nm -gU` on the
+# framework binary (research D11). A build against it therefore cannot seal a
+# Kerberos message and cannot speak NTLM at all, so MIT krb5 (Homebrew `krb5`) is
+# preferred there and the framework is only a fallback that says what it cannot
+# do.
 # =============================================================================
-if(APPLE)
-    find_library(XMLA_GSS_FRAMEWORK GSS REQUIRED)
-    set(XMLA_GSS_LIBRARIES ${XMLA_GSS_FRAMEWORK})
-    set(XMLA_GSS_INCLUDE_DIRS "")
-    message(STATUS "xmla: GSSAPI via ${XMLA_GSS_FRAMEWORK}")
-else()
-    find_package(PkgConfig REQUIRED)
+find_package(PkgConfig QUIET)
+
+set(XMLA_GSS_FOUND FALSE)
+
+if(PkgConfig_FOUND)
     # Both are needed. libkrb5 does NOT arrive transitively through
     # krb5-gssapi.pc on at least Ubuntu 24.04: linking only -lgssapi_krb5 leaves
     # "undefined reference to krb5_free_error_message".
-    pkg_check_modules(XMLA_GSSAPI REQUIRED krb5-gssapi)
-    pkg_check_modules(XMLA_KRB5 REQUIRED krb5)
-    set(XMLA_GSS_LIBRARIES ${XMLA_GSSAPI_LIBRARIES} ${XMLA_KRB5_LIBRARIES})
-    set(XMLA_GSS_INCLUDE_DIRS ${XMLA_GSSAPI_INCLUDE_DIRS} ${XMLA_KRB5_INCLUDE_DIRS})
-    link_directories(${XMLA_GSSAPI_LIBRARY_DIRS} ${XMLA_KRB5_LIBRARY_DIRS})
-    message(STATUS "xmla: GSSAPI ${XMLA_GSSAPI_VERSION}, krb5 ${XMLA_KRB5_VERSION}")
+    pkg_check_modules(XMLA_GSSAPI QUIET krb5-gssapi)
+    pkg_check_modules(XMLA_KRB5 QUIET krb5)
+    if(XMLA_GSSAPI_FOUND AND XMLA_KRB5_FOUND)
+        set(XMLA_GSS_FOUND TRUE)
+        set(XMLA_GSS_LIBRARIES ${XMLA_GSSAPI_LIBRARIES} ${XMLA_KRB5_LIBRARIES})
+        set(XMLA_GSS_INCLUDE_DIRS ${XMLA_GSSAPI_INCLUDE_DIRS} ${XMLA_KRB5_INCLUDE_DIRS})
+        link_directories(${XMLA_GSSAPI_LIBRARY_DIRS} ${XMLA_KRB5_LIBRARY_DIRS})
+        message(STATUS "xmla: MIT GSSAPI ${XMLA_GSSAPI_VERSION}, krb5 ${XMLA_KRB5_VERSION}")
+    endif()
+endif()
+
+# Apple's GSS.framework is detected only so the failure below can say something
+# useful. It is NOT accepted as a GSSAPI: it declares the IOV types and constants
+# but exports neither gss_wrap_iov nor gss_unwrap_iov, and ships no NTLM
+# mechanism (research D11, verified with `nm -gU` on the framework binary). A
+# build against it would configure, compile most of the way, and then be unable
+# to seal a single message -- a runtime failure standing in for a build-time one.
+set(XMLA_APPLE_FRAMEWORK_ONLY FALSE)
+if(NOT XMLA_GSS_FOUND AND APPLE)
+    find_library(XMLA_GSS_FRAMEWORK GSS)
+    if(XMLA_GSS_FRAMEWORK)
+        set(XMLA_APPLE_FRAMEWORK_ONLY TRUE)
+    endif()
+endif()
+
+# The extension cannot authenticate without GSSAPI and there is no
+# unauthenticated path to fall back to, so a missing GSSAPI is a broken build --
+# NOT a reduced one, which is the choice the neighbouring mssql extension makes
+# because it also offers SQL authentication.
+#
+# The hermetic protocol tests are the exception and are built regardless: they
+# must pass on a machine that has never contacted an Analysis Services instance
+# (constitution III), and that machine may equally never have had a Kerberos
+# library on it.
+option(XMLA_REQUIRE_GSS "Fail the build when GSSAPI is missing" ON)
+if(NOT XMLA_GSS_FOUND AND XMLA_REQUIRE_GSS)
+    if(XMLA_APPLE_FRAMEWORK_ONLY)
+        message(FATAL_ERROR
+            "xmla: Apple's GSS.framework was found but cannot be used. It exports no "
+            "gss_wrap_iov and ships no NTLM mechanism, so no message could be sealed. "
+            "Install MIT krb5 and point pkg-config at it:\n"
+            "    brew install krb5\n"
+            "    PKG_CONFIG_PATH=$(brew --prefix krb5)/lib/pkgconfig cmake -S . -B build\n"
+            "Or configure with -DXMLA_REQUIRE_GSS=OFF to build only the hermetic "
+            "protocol tests, which need no security library.")
+    endif()
+    message(FATAL_ERROR
+        "xmla: no GSSAPI. Install libkrb5-dev (Debian/Ubuntu), krb5-devel (RHEL/Fedora) "
+        "or krb5 (Homebrew). Configure with -DXMLA_REQUIRE_GSS=OFF to build only the "
+        "hermetic protocol tests, which need no security library.")
 endif()
 
 # =============================================================================
@@ -54,12 +99,23 @@ endif()
 set(XMLA_PROTOCOL_SOURCES
     src/xmla/dime.cpp
     src/xmla/transport.cpp
+    src/xmla/sealing.cpp
 )
 
 add_library(xmla_protocol STATIC ${XMLA_PROTOCOL_SOURCES})
-target_include_directories(xmla_protocol PUBLIC src/include ${XMLA_GSS_INCLUDE_DIRS})
-target_link_libraries(xmla_protocol ${XMLA_GSS_LIBRARIES})
+target_include_directories(xmla_protocol PUBLIC src/include)
 set_target_properties(xmla_protocol PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+# The GSS binding is its own target so that xmla_protocol links no security
+# library at all. That is not tidiness: it is what lets the hermetic suite build
+# and run where no GSSAPI exists, and it makes "did a protocol source acquire a
+# GSS dependency?" a link error rather than a review question.
+if(XMLA_GSS_FOUND)
+    add_library(xmla_gss STATIC src/xmla/gss_context.cpp)
+    target_include_directories(xmla_gss PUBLIC src/include PRIVATE ${XMLA_GSS_INCLUDE_DIRS})
+    target_link_libraries(xmla_gss xmla_protocol ${XMLA_GSS_LIBRARIES})
+    set_target_properties(xmla_gss PROPERTIES POSITION_INDEPENDENT_CODE ON)
+endif()
 
 # =============================================================================
 # Hermetic protocol tests. No sockets, no server, no DuckDB.

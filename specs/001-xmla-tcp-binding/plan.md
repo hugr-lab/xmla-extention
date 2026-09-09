@@ -17,8 +17,9 @@ involved.
 is not set by this project — setting it with `CACHE FORCE` overrides DuckDB's own settings and
 causes ODR issues, which is a mistake the neighbouring extension documents having made.
 
-**Primary dependencies**: DuckDB (submodule), `extension-ci-tools` (submodule), GSSAPI —
-MIT krb5 `libgssapi_krb5` + `libkrb5` on Linux, `GSS.framework` on macOS. Nothing else.
+**Primary dependencies**: DuckDB (submodule), `extension-ci-tools` (submodule), and MIT krb5
+(`libgssapi_krb5` + `libkrb5`) on every platform — including macOS (research D11). Nothing
+else.
 `vcpkg.json` exists but declares no packages, because there are none to declare.
 
 **Storage**: none. The extension holds no state across sessions.
@@ -27,9 +28,11 @@ MIT krb5 `libgssapi_krb5` + `libkrb5` on Linux, `GSS.framework` on macOS. Nothin
 through the byte seam with sockets disabled; sqllogictest for the DuckDB surface; the
 container probes in `test/gss/` for mechanism questions.
 
-**Target platform**: Linux x86-64 first; macOS built in CI to catch BSD/Linux socket
-divergence. Windows is not a target — a Windows user already has `msolap`, and reproducing a
-COM dependency would forfeit the point of the project.
+**Target platform**: Linux x86-64 first. macOS builds and runs the *hermetic protocol tests*
+in CI, to catch BSD/Linux socket divergence in `transport` — but a working macOS client needs
+MIT krb5 from Homebrew, because Apple's `GSS.framework` exports no `gss_wrap_iov` and no NTLM
+mechanism and so cannot seal a message at all (research D11). Windows is not a target — a
+Windows user already has `msolap`, and reproducing a COM dependency would forfeit the point.
 
 **Performance goals**: none stated. Metadata discovery and analytic queries are latency-bound
 on the server. The one performance property that matters is that reassembly must not be
