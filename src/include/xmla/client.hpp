@@ -70,9 +70,19 @@ public:
 	Rowset Discover(const std::string &request_type, const std::map<std::string, std::string> &restrictions = {},
 					const std::string &catalog = std::string());
 
-	//! Run a read-only analytic statement. Read-only by construction: the
-	//! envelope layer has no builder for a mutating command, so no argument here
-	//! can reach one.
+	//! Run a read-only analytic statement.
+	//!
+	//! Read-only by VALIDATION, not by construction. XMLA's <Statement> is the
+	//! entry point to the whole command surface — MDX writeback, DMX and
+	//! stored-procedure CALL all travel through it — so the statement is checked
+	//! against an allowlist of query keywords and refused otherwise.
+	//!
+	//! Throws ProtocolError when the statement is not a query, which includes a
+	//! statement batch: a separator with further text after it is refused even
+	//! when the first keyword is a query keyword.
+	//!
+	//! The guard is not sufficient on its own. Grant the connecting account
+	//! read-only permissions on the server.
 	Rowset Execute(const std::string &statement, const std::string &catalog = std::string());
 
 	State state() const {

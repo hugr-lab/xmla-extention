@@ -63,10 +63,27 @@ jobs:
       # implementation and the reasoning in the docs goes stale. Better to be
       # told.
       - name: gss_wrap_iov is still unavailable for NTLM
+        # pipefail, because `docker run | tee` otherwise reports tee's status and
+        # the container's exit code is discarded entirely.
+        shell: bash -euo pipefail {0}
         run: |
           docker run --rm xmla-gss-ntlm:latest 2>&1 | tee out.txt
-          grep -q "FAIL gss_wrap_iov" out.txt \
-            || { echo "gss_wrap_iov now WORKS for NTLM - research D4 needs revisiting"; exit 1; }
+
+          # Assert the POSITIVE for the case we care about. The probe prints
+          # "FAIL <stage>" for every stage it can fail at — import_name,
+          # acquire_cred, accept_sec_context — so grepping for the absence of
+          # "FAIL gss_wrap_iov" reports "gss_wrap_iov now WORKS" whenever a
+          # packaging change breaks the handshake before the IOV call is even
+          # reached. That is the opposite of what happened, and it sends the
+          # reader off to revise a finding that is still true.
+          if grep -q "gss_wrap_iov OK" out.txt; then
+            echo "gss_wrap_iov now WORKS for NTLM - research D4 needs revisiting"; exit 1
+          fi
+          if ! grep -q "^FAIL gss_wrap_iov" out.txt; then
+            echo "the probe failed somewhere OTHER than gss_wrap_iov - it is broken, not informative"
+            grep "^FAIL" out.txt || echo "  (no FAIL line at all)"
+            exit 1
+          fi
           grep -q "the frame is buildable for NTLM" out.txt \
             || { echo "the gss_wrap token split no longer holds"; exit 1; }
 
@@ -88,27 +105,55 @@ jobs:
           cache-to: type=gha,scope=gss-krb,mode=max
 
       - name: Stand up the KDC and measure every AES enctype
+        shell: bash -euo pipefail {0}
         run: docker run --rm xmla-gss-krb:latest 2>&1 | tee out.txt
 
-      - name: Nothing padded, and the frame is expressible
+      - name: Every enctype was actually measured, and none padded
+        shell: bash -euo pipefail {0}
         run: |
-          # The frame has no field for an unpadded length, so a padding mechanism
-          # cannot be expressed at all. Measured zero for all four AES enctypes;
-          # this fails the build if that ever stops being true.
-          if grep -q "PADDING seen: \*\*\*" out.txt; then
-            echo "an enctype now pads - the frame cannot carry it, see research D5"; exit 1
+          # ASSERT ON POSITIVES. The previous version of this step passed green
+          # when every measurement failed, and it is worth spelling out why,
+          # because the shape recurs: run.sh prints the "session key actually
+          # used" line from klist AFTER the probe, whether or not the probe
+          # succeeded; it swallows a probe failure with `|| echo "probe exited
+          # non-zero"`; and the padding check was a NEGATIVE grep, which also
+          # matches nothing when the probe never got far enough to print
+          # "PADDING seen:" at all. So all four etype lines appeared, no
+          # MISMATCH appeared, no "PADDING seen: ***" appeared, and the job
+          # announced "four enctypes measured, none padded" having measured
+          # nothing.
+          if grep -q "probe exited non-zero" out.txt; then
+            echo "the probe failed; the etype lines below it come from klist, not from a measurement"
+            exit 1
           fi
+          for marker in RT-FAILED LEN-CHANGED NOT-ENCRYPTED; do
+            if grep -q "$marker" out.txt; then
+              echo "a wrap_iov round-trip reported $marker"; exit 1
+            fi
+          done
+          if grep -q "PADDING seen: \*\*\*" out.txt; then
+            echo "an enctype now pads - the frame has no field for it, see research D5"; exit 1
+          fi
+
+          # Require the verdict and the padding line ONCE PER ENCTYPE, so a run
+          # that measured two and died cannot pass by absence.
+          verdicts=$(grep -c "VERDICT: gss_wrap_iov gives the SSAS frame layout" out.txt || true)
+          padlines=$(grep -c "PADDING seen: no" out.txt || true)
+          if [ "$verdicts" -ne 4 ] || [ "$padlines" -ne 4 ]; then
+            echo "expected 4 verdicts and 4 padding lines, got $verdicts and $padlines"; exit 1
+          fi
+
           for e in aes256-cts-hmac-sha1-96 aes128-cts-hmac-sha1-96 \
                    aes256-cts-hmac-sha384-192 aes128-cts-hmac-sha256-128; do
             grep -q "session key actually used: $e" out.txt \
               || { echo "no measurement for $e - the run did not vary the session key"; exit 1; }
           done
+
           # A run that silently used one principal for every enctype reports four
           # identical rows and looks like a pass. It happened during development.
-          #
-          # Written as `if`, not `grep -q ... && { exit 1; }`: the && form makes
-          # the step FAIL when grep finds nothing, which is the healthy case.
+          # Written as `if`, not `grep -q ... && exit 1`: the && form fails the
+          # step when grep finds nothing, which is the healthy case.
           if grep -q "MISMATCH" out.txt; then
             echo "a run used a principal it did not intend - the rows are not four enctypes"; exit 1
           fi
-          echo "four enctypes measured, none padded"
+          echo "four enctypes measured and verified, none padded"

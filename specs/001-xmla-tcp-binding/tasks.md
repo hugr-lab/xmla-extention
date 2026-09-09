@@ -118,10 +118,12 @@ marked below.
 
 ## Phase 6: CI and polish
 
-- [x] **T-060** `ci.yml`: lint; C++ unit tests on a linux/macos matrix; a build-matrix
-      resolver job feeding the build job — a job output, not an `if:` on the build job,
-      because GitHub does not expose the `matrix` context to `jobs.<id>.if` and such a test
-      evaluates empty, silently skipping the job.
+- [~] **T-060** `ci.yml`: lint and C++ unit tests on a linux/macos matrix are **done**, plus
+      sanitizers and the leak-gate regression suite. Still outstanding: the extension build
+      itself and the build-matrix resolver job that feeds it — a job output, not an `if:` on
+      the build job, because GitHub does not expose the `matrix` context to `jobs.<id>.if`
+      and such a test evaluates empty, silently skipping the job. Neither exists yet because
+      there is no DuckDB submodule to build against; it lands with T-001.
 - [x] **T-061** `kerberos.yml`: path-filtered on the auth and sealing sources, buildx layer
       caching, logs dumped on failure.
 - [ ] **T-062** `mock-server.yml`: a mock instance in a container plus standalone unit tests

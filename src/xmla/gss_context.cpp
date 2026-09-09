@@ -4,6 +4,7 @@
 
 #include <gssapi/gssapi.h>
 #include <gssapi/gssapi_ext.h>
+#include <cctype>
 #include <cstring>
 
 namespace xmla {

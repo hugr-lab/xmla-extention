@@ -3,6 +3,7 @@
 #include "xmla/errors.hpp"
 #include "xmla/rowset.hpp"
 
+#include <clocale>
 #include <string>
 
 using namespace xmla;
@@ -135,6 +136,56 @@ TEST_CASE("a comment cannot hide a mutating keyword from the allowlist") {
 	REQUIRE_THROWS_EXACTLY(ProtocolError, Execute("/* EVALUATE */ UPDATE CUBE [S] SET (x) = 0", "", ""));
 	REQUIRE_THROWS_EXACTLY(ProtocolError, Execute("// EVALUATE\nDROP MINING MODEL [M]", "", ""));
 	REQUIRE_THROWS_EXACTLY(ProtocolError, Execute("   \n\t  CALL Something()", "", ""));
+}
+
+TEST_CASE("a mutating statement cannot hide behind a query in a batch") {
+	// Checking only the FIRST keyword is the classic allowlist bypass. SSMS
+	// sends semicolon-separated MDX as a single XMLA Execute/Statement, so a
+	// first-token check would carry a writeback behind a harmless SELECT.
+	const char *batches[] = {
+		"SELECT {} ON 0 FROM [Sales]; UPDATE CUBE [Sales] SET ([Measures].[Amount]) = 0",
+		"WITH MEMBER [M] AS 1 SELECT {} ON 0 FROM [S]; DROP MINING MODEL [M]",
+		"EVALUATE Sales; EVALUATE Other",
+		"EVALUATE Sales ;\n  DELETE FROM [M].CONTENT",
+		"EVALUATE Sales; // trailing comment does not make it one statement\nCALL X()",
+	};
+	for (const char *stmt : batches) {
+		REQUIRE_THROWS_EXACTLY(ProtocolError, Execute(stmt, "", ""));
+	}
+}
+
+TEST_CASE("a separator inside a literal or an identifier is not a separator") {
+	// Refusing these would break legitimate queries, which is how a guard gets
+	// switched off entirely.
+	const char *fine[] = {
+		"EVALUATE FILTER(T, [a] = \"x;y\")",
+		"EVALUATE FILTER(T, [a] = 'x;y')",
+		"SELECT {} ON 0 FROM [Cube;With;Semicolons]",
+		"EVALUATE ROW(\"k\", \"a;b\")",
+		"EVALUATE Sales;",	// a trailing separator carries nothing
+		"EVALUATE Sales;   \n\t  ",
+		"EVALUATE Sales; // just a comment",
+	};
+	for (const char *stmt : fine) {
+		const std::string env = Execute(stmt, "", "");
+		REQUIRE(Has(env, "<Statement>"));
+	}
+}
+
+TEST_CASE("the allowlist does not depend on the process locale") {
+	// ::toupper follows LC_CTYPE, and a DuckDB extension runs inside a host that
+	// may have called setlocale -- CPython does. Under tr_TR.UTF-8, toupper('i')
+	// is not 'I', so "with"/"define" would fold to "WiTH"/"DEFiNE" and a valid
+	// query would be refused. Keyword syntax is ASCII by definition.
+	const char *previous = setlocale(LC_CTYPE, nullptr);
+	std::string saved = previous ? previous : "C";
+	// Best effort: if the locale is unavailable on this machine the test still
+	// exercises the ASCII path, it just cannot demonstrate the difference.
+	setlocale(LC_CTYPE, "tr_TR.UTF-8");
+	const std::string env = Execute("with member [M] as 1 select {} on 0 from [S]", "", "");
+	REQUIRE(Has(env, "<Statement>"));
+	Execute("define var x = 1 evaluate ROW(\"a\", x)", "", "");
+	setlocale(LC_CTYPE, saved.c_str());
 }
 
 TEST_CASE("the refusal does not echo the statement back") {

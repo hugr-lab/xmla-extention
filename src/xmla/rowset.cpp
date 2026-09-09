@@ -1,5 +1,6 @@
 #include "xmla/rowset.hpp"
 
+#include <cctype>
 #include <cstddef>
 
 namespace xmla {
@@ -50,7 +51,11 @@ std::string DecodeEntities(const std::string &in) {
 			try {
 				cp = (ref[1] == 'x' || ref[1] == 'X') ? std::stoul(ref.substr(2), nullptr, 16)
 													  : std::stoul(ref.substr(1), nullptr, 10);
-				ok = cp != 0 && cp <= 0x10FFFF;
+				// Surrogates are not Unicode scalar values. Encoding one with the
+				// 3-byte branch produces CESU-8, not UTF-8, and DuckDB's VARCHAR
+				// requires well-formed UTF-8 — so it would surface as an
+				// invalid-UTF-8 error attributed to the wrong layer.
+				ok = cp != 0 && cp <= 0x10FFFF && !(cp >= 0xD800 && cp <= 0xDFFF);
 			} catch (...) {
 				ok = false;
 			}
@@ -190,7 +195,14 @@ Rowset ParseRowset(const std::string &text) {
 		const std::string local = LocalName(tag.qname);
 
 		if (tag.is_close) {
-			depth--;
+			// Clamped. Unmatched leading close tags drove this negative, after
+			// which row_depth went negative too, every `row_depth >= 0` guard
+			// failed, and the function returned an EMPTY rowset with no error —
+			// indistinguishable from "no catalogs visible to this account",
+			// which this layer documents as a meaningful answer.
+			if (depth > 0) {
+				depth--;
+			}
 			// depth has already been decremented, so a direct child of <row>
 			// closes at row_depth + 1: <row> itself sits AT row_depth.
 			if (!pending_field.empty() && row_depth >= 0 && depth == row_depth + 1) {
