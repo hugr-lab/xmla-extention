@@ -16,6 +16,56 @@ allow_ip='^(127\.|0\.0\.0\.0$|192\.0\.2\.|198\.51\.100\.|203\.0\.113\.|255\.255\
 # a reword silently produces a gate that scans nothing and exits 0 -- green while
 # checking zero files, which is worse than having no job at all.
 files_cmd="${LEAK_GATE_FILES_CMD:-git diff --cached --name-only --diff-filter=ACM}"
+
+# Scan the STAGED blob, not the working-tree file.
+#
+# The gate's whole claim is about "a commit whose staged file CONTENTS contain
+# identifying tokens", and it was reading `$f` off disk instead. Those diverge
+# routinely, and the divergence fails OPEN: stage a file containing a connection
+# string, edit the string out without re-staging, and the gate scans the cleaned
+# working copy, finds nothing, and lets the staged secret through. The inverse
+# also fires -- a clean staged version blocked by unstaged edits -- which trains
+# people to reach for --no-verify.
+#
+# The same applies to the binary digest: hashing the working tree attests to a
+# different blob than the one being committed, so an allowlist entry could vouch
+# for content that is not what lands.
+#
+# When the caller supplied its own file list (CI scanning every tracked file)
+# there is no index to read from, so the working tree IS the subject.
+scan_dir=""
+# `return 0` is load-bearing. An EXIT trap whose last command fails sets the
+# script's exit status, so `[ -n "$scan_dir" ] && rm -rf ...` made EVERY run
+# exit 1 when scan_dir was empty -- a gate that blocks everything, which reads
+# exactly like a gate that is working.
+cleanup() {
+  if [ -n "$scan_dir" ]; then
+    rm -rf "$scan_dir"
+  fi
+  return 0
+}
+trap cleanup EXIT
+
+# Materialise the staged content of $1 and echo the path to scan. Falls back to
+# the working-tree path when there is no index entry (an explicit file list, or
+# a file staged as a deletion).
+materialise() {
+  local path="$1"
+  if [ -n "$explicit_files_cmd" ]; then
+    printf '%s' "$path"
+    return 0
+  fi
+  if [ -z "$scan_dir" ]; then
+    scan_dir=$(mktemp -d) || return 1
+  fi
+  local out="$scan_dir/blob"
+  if git cat-file blob ":$path" > "$out" 2>/dev/null; then
+    printf '%s' "$out"
+  else
+    # No staged blob (deleted, or unmerged). Nothing to scan.
+    return 1
+  fi
+}
 # Whether an empty file list is an error depends on who asked. A caller that named
 # its own command (CI scanning every tracked file) meant to scan something, so zero
 # files is a broken invocation. The default staged-files command legitimately yields
@@ -34,7 +84,11 @@ sha256_of() {
 leak=0
 scanned=0
 while IFS= read -r f; do
-  [ -f "$f" ] || continue
+  # `-f` tests the WORKING TREE, which is wrong for a staged rename or a file
+  # that has since been removed on disk but is still staged for commit. The
+  # index is the authority here, so let materialise decide.
+  scan_target=$(materialise "$f") || continue
+  [ -f "$scan_target" ] || continue
   # Counted HERE, not at the end of the body: every `continue` below -- the hook
   # itself, and BOTH binary outcomes including an allowlisted one -- skipped the
   # increment, so a list of only reviewed binaries reported "the file list is
@@ -57,8 +111,8 @@ while IFS= read -r f; do
   # re-captured screenshot now showing a hostname in the URL bar would pass
   # unreviewed, which is precisely the case the review is for. Keying on content
   # means replacing the file re-arms the gate.
-  if [ -s "$f" ] && ! grep -qI '' "$f" 2>/dev/null; then
-    digest=$(sha256_of "$f")
+  if [ -s "$scan_target" ] && ! grep -qI '' "$scan_target" 2>/dev/null; then
+    digest=$(sha256_of "$scan_target")
     if [ -f .leakgate-allow ] && grep -qxF "$digest  $f" .leakgate-allow 2>/dev/null; then
       : # this exact content was reviewed by hand and recorded
     else
@@ -71,7 +125,7 @@ while IFS= read -r f; do
   fi
 
   # non-IP token classes
-  if grep -qEI "$nonip" "$f" 2>/dev/null; then
+  if grep -qEI "$nonip" "$scan_target" 2>/dev/null; then
     echo "leak-gate: host/SID/connection-string token in: $f" >&2; leak=1
   fi
   # any IPv4 that is NOT in the allowlist. Each token carries its image-reference
@@ -131,7 +185,7 @@ while IFS= read -r f; do
     # components is an OID, a version string, or something else that is not an
     # address. Four-component version numbers are still reported -- they are rare,
     # and a false positive that can be reworded is the right side to err on.
-  done < <(grep -oEI '\b([A-Za-z0-9._-]+/[A-Za-z0-9._/-]*:)?[0-9]{1,3}(\.[0-9]{1,3})+\b' "$f" 2>/dev/null | sort -u)
+  done < <(grep -oEI '\b([A-Za-z0-9._-]+/[A-Za-z0-9._/-]*:)?[0-9]{1,3}(\.[0-9]{1,3})+\b' "$scan_target" 2>/dev/null | sort -u)
 done < <(eval "$files_cmd")
 
 # A gate that scanned nothing and exited 0 is worse than no gate: it is green while
