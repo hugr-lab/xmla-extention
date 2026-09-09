@@ -189,7 +189,21 @@ case "$gate_stderr" in
     *"$staged_digest"*) echo "  ok    ^ named the staged digest"; pass=$((pass + 1)) ;;
     *) echo "  FAIL  ^ named a digest other than the staged one"; fail=$((fail + 1)) ;;
 esac
-git -C "$SANDBOX" rm -q --cached b.bin >/dev/null 2>&1; rm -f "$SANDBOX/b.bin"
+git -C "$SANDBOX" rm -q --cached -f b.bin >/dev/null 2>&1; rm -f "$SANDBOX/b.bin"
+
+# A cleanup that silently fails poisons every later case with a stale staged
+# file, and the failure presents as an unrelated case failing. Assert it instead
+# of trusting it.
+assert_index_clean() {
+    local left
+    left=$(git -C "$SANDBOX" diff --cached --name-only -z --diff-filter=ACMRT | tr '\0' ' ')
+    if [ -n "$left" ]; then
+        echo "  FAIL  index not clean after '$1': [$left]"
+        fail=$((fail + 1))
+        git -C "$SANDBOX" reset -q >/dev/null 2>&1
+    fi
+}
+assert_index_clean "binaries"
 
 echo "quoted paths:"
 # With core.quotePath at its default, git renders this filename as a quoted,
@@ -211,6 +225,31 @@ case "$gate_stderr" in
 esac
 git -C "$SANDBOX" rm -q --cached "café.md" >/dev/null 2>&1
 rm -f "$SANDBOX/café.md"
+
+assert_index_clean "quoted paths"
+
+echo "submodules:"
+# A gitlink is a commit id, not a blob, so there is no content in THIS repository
+# to scan and skipping it is correct. It must be an EXPLICIT skip keyed on the
+# index MODE: `git cat-file -t ":path"` does not report "commit" for a gitlink,
+# it fails outright, so a blanket failure handler would either refuse every
+# submodule or hide every real read error.
+#
+# The entry is created with update-index rather than `submodule add`, which needs
+# a second repository and protocol.file.allow and can fail for reasons that have
+# nothing to do with the gate.
+# A sha that is NOT an object in this repository, which is what a real submodule
+# gitlink looks like: it names a commit in the SUBMODULE's history. Pointing it
+# at a blob that happens to exist here makes cat-file succeed and the case pass
+# whether or not the gate skips gitlinks at all — the first version of this
+# fixture did exactly that and could not fail.
+absent_sha=0123456789abcdef0123456789abcdef01234567
+git -C "$SANDBOX" update-index --add --cacheinfo "160000,$absent_sha,vendored" 2>/dev/null
+run_gate
+report "a submodule gitlink is skipped, not refused as unreadable" "$gate_verdict" "PASS"
+git -C "$SANDBOX" update-index --force-remove vendored 2>/dev/null
+
+assert_index_clean "submodules"
 
 echo "hygiene:"
 # The scan directory was created inside a command substitution, so the parent

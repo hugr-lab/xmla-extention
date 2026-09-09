@@ -1,0 +1,52 @@
+extension:
+  name: xmla
+  description: "Query SQL Server Analysis Services over the native XMLA/TCP binding, from Linux — no IIS, no COM, no Windows components."
+  version: "0.0.1"
+  language: "C++"
+  build: "cmake"
+  license: "Apache-2.0"
+  maintainers:
+    - "oluies"
+    - "VGSML"
+  # Windows is excluded on purpose rather than by omission: a Windows user
+  # already has msolap, and the whole point of this extension is to reach SSAS
+  # without COM. macOS needs MIT krb5 from Homebrew, because Apple's
+  # GSS.framework exports no gss_wrap_iov and no NTLM mechanism and therefore
+  # cannot seal a message at all.
+  excluded_platforms: "windows_amd64;windows_amd64_mingw;windows_arm64;wasm_mvp;wasm_eh;wasm_threads"
+
+repo:
+  github: "hugr-lab/xmla-extention"
+  ref: "main"
+
+docs:
+  hello_world: |
+    INSTALL xmla FROM community;
+    LOAD xmla;
+    ATTACH 'host=ssas-host port=2383' AS aw (TYPE xmla);
+    SELECT * FROM aw.model."Internet Sales" LIMIT 10;
+
+  extended_description: |
+    Reads SQL Server Analysis Services over the **native XMLA/TCP binding**, so a
+    Linux client needs no IIS, no msmdpump, no COM and no MSOLAP provider.
+
+    DuckDB's existing `msolap` extension reaches Analysis Services only on
+    Windows, because it binds COM/OLE DB. The alternative — speaking XMLA over
+    HTTP — is what forces an IIS deployment in front of every instance.
+
+    Named for the wire protocol rather than a product: the same protocol serves
+    SSAS, Azure Analysis Services and Power BI Premium endpoints.
+
+    Status:
+    - NTLM works end to end, verified against SQL Server 2022 on tabular and
+      multidimensional instances.
+    - Kerberos is UNVERIFIED against a live server. The mechanism-level questions
+      are settled in CI against an MIT KDC; what remains open is whether a
+      Kerberos-speaking SSAS lays out its single token buffer the way this client
+      assembles one. It is marked unverified rather than claimed.
+
+    Read-only, in two tiers: metadata by construction (no mutating envelope
+    builder exists) and statements by validation (the XMLA `<Statement>` element
+    carries the whole command surface, so it is checked against a query
+    allowlist). Grant the connecting account read-only permissions on the server;
+    that is the only control that cannot be reasoned around.

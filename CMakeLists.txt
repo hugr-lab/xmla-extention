@@ -147,3 +147,50 @@ endif()
 
 enable_testing()
 add_test(NAME xmla_protocol_tests COMMAND xmla_test)
+
+# =============================================================================
+# The DuckDB extension itself.
+#
+# Only when DuckDB's build system is driving this file: `build_loadable_extension`
+# is defined by DuckDB's CMake, so a standalone configure (which is how the
+# hermetic protocol suite is built, and how a contributor with no DuckDB checkout
+# builds) skips this block entirely rather than failing on an unknown command.
+# =============================================================================
+if(COMMAND build_loadable_extension)
+    set(EXTENSION_NAME ${TARGET_NAME}_extension)
+    set(LOADABLE_EXTENSION_NAME ${TARGET_NAME}_loadable_extension)
+
+    # The protocol sources are compiled INTO the extension rather than linked as
+    # a static library. build_static_extension puts its target in DuckDB's export
+    # set, and CMake then requires every linked target to be exported too --
+    # which would drag xmla_protocol and xmla_gss into DuckDB's install interface
+    # for no benefit. Compiling them in costs one extra compile of ~10 files.
+    #
+    # The layering rule is unaffected: it is enforced at SOURCE level by
+    # scripts/ci/check_layering.sh, not by which library a file lands in.
+    set(XMLA_EXTENSION_SOURCES src/xmla_extension.cpp ${XMLA_PROTOCOL_SOURCES})
+    if(XMLA_GSS_FOUND)
+        list(APPEND XMLA_EXTENSION_SOURCES src/xmla/gss_context.cpp)
+    endif()
+
+    build_static_extension(${TARGET_NAME} ${XMLA_EXTENSION_SOURCES})
+    build_loadable_extension(${TARGET_NAME} " " ${XMLA_EXTENSION_SOURCES})
+
+    foreach(target ${EXTENSION_NAME} ${LOADABLE_EXTENSION_NAME})
+        target_include_directories(${target} PRIVATE src/include ${XMLA_GSS_INCLUDE_DIRS})
+        if(XMLA_GSS_FOUND)
+            target_link_libraries(${target} ${XMLA_GSS_LIBRARIES})
+        endif()
+        target_compile_definitions(${target} PRIVATE XMLA_VERSION="${XMLA_EXTENSION_VERSION}")
+    endforeach()
+
+    install(
+        TARGETS ${EXTENSION_NAME}
+        EXPORT "${DUCKDB_EXPORT_SET}"
+        LIBRARY DESTINATION "${INSTALL_LIB_DIR}"
+        ARCHIVE DESTINATION "${INSTALL_LIB_DIR}")
+
+    message(STATUS "xmla: extension targets configured (DuckDB build)")
+else()
+    message(STATUS "xmla: standalone build - protocol library and tests only")
+endif()

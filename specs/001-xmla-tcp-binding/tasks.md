@@ -15,9 +15,20 @@ marked below.
 
 ## Phase 1: Setup
 
-- [ ] **T-001** Extension skeleton: `CMakeLists.txt`, `extension_config.cmake`, `Makefile`,
-      `vcpkg.json`, `description.yml`, `.clang-format`, the `duckdb` and `extension-ci-tools`
-      submodules. Builds and loads an extension that registers nothing.
+- [x] **T-001** Extension skeleton. DuckDB pinned to **v2.0-cyanoptera** (submodule at
+      a0315f71), matching `hugr-lab/mssql-extension`. Verified: `make release` builds
+      `xmla.duckdb_extension` and DuckDB reports it loaded at version 0.0.1.
+
+      Two things worth knowing. The protocol sources are compiled INTO the extension rather
+      than linked as a static library, because `build_static_extension` places its target in
+      DuckDB's export set and CMake then demands every linked target be exported too. And the
+      extension block is guarded on `if(COMMAND build_loadable_extension)`, so a standalone
+      configure — which is how the hermetic suite builds, with no DuckDB and no Kerberos —
+      skips it rather than failing on an unknown command.
+
+      **Not yet covered by CodeQL**: `src/xmla_extension.cpp` only compiles in the DuckDB
+      build, and the CodeQL job builds standalone. It comes in with the extension build job,
+      which is T-060's remaining scope.
 - [x] **T-002** GSSAPI discovery in CMake: `krb5-gssapi` + `krb5` via pkg-config on Linux,
       `GSS.framework` on macOS. A **hard failure** when absent, not a warning — authentication
       is not optional here, so the dependency is not either.
