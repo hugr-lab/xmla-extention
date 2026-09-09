@@ -1,0 +1,8 @@
+#!/bin/sh
+# roborev pre-push hook v3 - flushes pending post-commit batches before push
+ROBOREV="/opt/homebrew/bin/roborev"
+if [ ! -x "$ROBOREV" ]; then
+    ROBOREV=$(command -v roborev 2>/dev/null)
+    [ -z "$ROBOREV" ] || [ ! -x "$ROBOREV" ] && exit 0
+fi
+"$ROBOREV" post-commit --flush-push 2>/dev/null || true
