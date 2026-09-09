@@ -1,51 +1,56 @@
 #!/usr/bin/env bash
-# The wire path must not depend on the process locale.
+# The protocol layer must not depend on the process locale.
 #
 # A DuckDB extension is loaded into a host process that may have called
-# setlocale(LC_CTYPE, "") — CPython does, and so does R. Under tr_TR.UTF-8,
-# toupper('i') is not 'I', so a lower-case "with member ... select ..." folds to
-# "WiTH", misses the query allowlist, and a legitimate query is refused. Keyword
-# and identifier syntax here is ASCII by definition, so the locale has no
-# business in it.
+# setlocale(LC_CTYPE, "") — CPython does, and so does R. Under tr_TR.UTF-8
+# glibc's toupper('i') yields U+0130, which a cast to char truncates. Keyword,
+# identifier and XML syntax on this path is ASCII by definition, so the locale
+# has no business in it.
 #
-# This check exists because a source edit meant to fix exactly that silently did
-# not apply: the replacement no longer matched after the file was reformatted,
-# the ASCII helpers were left with no call sites, and the locale-bound calls
-# stayed. The unit test could not catch it either — it tries to switch to
-# tr_TR.UTF-8 and that locale is not installed on every machine, so it passed
-# without demonstrating anything. CodeQL found it, as "unused static function".
+# Three defects this has already caught, none of which the tests could:
+#   - a locale fix that silently did not apply, leaving the ASCII helpers with no
+#     call sites (found by CodeQL as "unused static function", not by this)
+#   - isspace in the XML scanner, where XML's own definition is narrower anyway
+#   - a fault-message fold in client.cpp that decides an ERROR CATEGORY, and a
+#     word-boundary test in redact.cpp that decides where a host or account name
+#     ends — both on paths where a fold that stops matching leaks or misreports
 #
-# A grep is a blunt instrument, but it is deterministic and it fails on the
-# exact shape that regressed.
+# The file set is DISCOVERED, not listed. The first version hardcoded two files
+# and went green while the same defect was live in two others.
 set -euo pipefail
 
-# Files that build XMLA on the wire. Their parsing decides what reaches a server.
-# redact.cpp folds case to match host/user literals — a constitution-I path, so
-# a fold that stops matching sends an unscrubbed literal into an error message.
-# gss_context.cpp folds the mechanism name, and "NEGOTIATE" contains an I.
-targets="src/xmla/envelopes.cpp src/xmla/rowset.cpp src/xmla/redact.cpp src/xmla/gss_context.cpp"
+files=$(find src/xmla src/include/xmla \( -name '*.cpp' -o -name '*.hpp' \) -print)
 
-pattern='(^|[^[:alnum:]_])(isalpha|isalnum|isupper|islower|isspace|isdigit|toupper|tolower)[[:space:]]*\('
+count=$(printf '%s\n' "$files" | grep -c '[^[:space:]]' || true)
+if [ "$count" -eq 0 ]; then
+    echo "locale: scanned 0 files -- the check is broken, which is not a pass" >&2
+    exit 1
+fi
+
+# The wide variants and the case-insensitive string compares fold per LC_CTYPE
+# too. isxdigit/ispunct are plausible additions to an XML scanner.
+pattern='(^|[^[:alnum:]_.>:])(isalpha|isalnum|isupper|islower|isspace|isdigit|isxdigit|ispunct|isprint|isblank|iscntrl|isgraph|toupper|tolower|towupper|towlower|strcasecmp|strncasecmp)[[:space:]]*\('
 
 fail=0
-for f in $targets; do
-    if [ ! -f "$f" ]; then
-        echo "locale: $f does not exist -- the check is stale, which is not a pass" >&2
-        exit 1
-    fi
-    # Strip comments before matching: the files explain WHY these are avoided,
-    # and a check that trips on its own rationale gets deleted.
-    if sed 's://.*::' "$f" | grep -nE "$pattern" >/dev/null 2>&1; then
+while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    # Strip // line comments and /* */ block comments before matching: these
+    # files EXPLAIN why the calls are avoided, and a check that trips on its own
+    # rationale gets deleted. A naive `s://.*::` also truncates at the // inside
+    # a URL literal, hiding real code after it — so block comments are removed
+    # first and the line-comment strip requires whitespace or start-of-line
+    # before the slashes.
+    stripped=$(perl -0pe 's{/\*.*?\*/}{}gs; s{(^|\s)//.*$}{$1}gm' "$f" 2>/dev/null || cat "$f")
+    if printf '%s' "$stripped" | grep -nE "$pattern" >/dev/null 2>&1; then
         echo "locale: $f calls a locale-sensitive ctype function" >&2
-        sed 's://.*::' "$f" | grep -nE "$pattern" | sed 's/^/    /' >&2
+        printf '%s' "$stripped" | grep -nE "$pattern" | sed 's/^/    /' >&2
         fail=1
     fi
-done
+done < <(printf '%s\n' "$files")
 
 if [ "$fail" != 0 ]; then
     echo "" >&2
-    echo "Use the ASCII helpers (AsciiAlpha/AsciiUpper/AsciiSpace) instead. Keyword and" >&2
-    echo "identifier syntax on this path is ASCII by definition." >&2
+    echo "Use an ASCII-only comparison. Syntax on this path is ASCII by definition." >&2
     exit 1
 fi
-echo "locale: $(echo $targets | wc -w | tr -d ' ') wire-path file(s), none locale-dependent"
+echo "locale: $count protocol file(s), none locale-dependent"

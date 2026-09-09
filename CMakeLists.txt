@@ -126,7 +126,13 @@ endif()
 # Hermetic protocol tests. No sockets, no server, no DuckDB.
 # =============================================================================
 file(GLOB XMLA_TEST_SOURCES test/cpp/*.cpp)
-add_executable(xmla_test ${XMLA_TEST_SOURCES})
+# EXCLUDE_FROM_ALL so the default target builds only what SHIPS.
+#
+# That is what lets the CodeQL job say `cmake --build build` and analyse exactly
+# the shipped code, without a hardcoded target list in the workflow that would
+# silently drop a new target — most obviously the DuckDB extension target itself,
+# which does not exist yet. Test jobs build it by name.
+add_executable(xmla_test EXCLUDE_FROM_ALL ${XMLA_TEST_SOURCES})
 target_include_directories(xmla_test PRIVATE test/cpp)
 target_link_libraries(xmla_test xmla_protocol)
 
