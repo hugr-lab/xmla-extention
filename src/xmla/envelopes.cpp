@@ -210,7 +210,16 @@ static void RejectStatementBatch(const std::string &s) {
 		}
 		if (s.compare(i, 2, "//") == 0 || s.compare(i, 2, "--") == 0 || s.compare(i, 2, "/*") == 0) {
 			size_t j = i;
-			SkipTrivia(s, j);
+			if (!SkipTrivia(s, j)) {
+				// An UNTERMINATED block comment. Whether a server treats the rest
+				// of the input as commented out or rejects the statement is its
+				// choice, and this guard's posture is to refuse the shape rather
+				// than assume one. Discarding this return let
+				// "EVALUATE Sales /* ; UPDATE CUBE [S] SET (x) = 0" through.
+				throw ProtocolError(
+					"this extension sends a single read-only statement, and this "
+					"one contains an unterminated block comment");
+			}
 			// SkipTrivia also eats whitespace, which is harmless here.
 			if (j <= i) {
 				i++;
@@ -221,7 +230,14 @@ static void RejectStatementBatch(const std::string &s) {
 		}
 		if (c == ';') {
 			size_t j = i + 1;
-			SkipTrivia(s, j);
+			if (!SkipTrivia(s, j)) {
+				// Same reasoning: an unterminated comment after a separator is not
+				// "nothing behind it". This let
+				// "EVALUATE Sales; /* UPDATE CUBE [S] SET (x) = 0" through.
+				throw ProtocolError(
+					"this extension sends a single read-only statement, and this "
+					"one contains an unterminated block comment after a separator");
+			}
 			if (j >= s.size()) {
 				return;	 // trailing separator, nothing behind it
 			}

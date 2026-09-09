@@ -137,3 +137,34 @@ TEST_CASE("an unrecognised entity is passed through, not dropped") {
 	const Rowset rs = ParseRowset("<row><A>a&nbsp;b</A></row>");
 	REQUIRE_EQ(rs.rows[0].at("A"), std::string("a&nbsp;b"));
 }
+
+TEST_CASE("a surrogate code point is left literal, not encoded as CESU-8") {
+	// Surrogates are not Unicode scalar values. The 3-byte branch would emit
+	// CESU-8, and DuckDB's VARCHAR requires well-formed UTF-8 — so it would
+	// surface as an invalid-UTF-8 error attributed to the wrong layer.
+	const Rowset lo = ParseRowset("<row><A>&#xD800;</A></row>");
+	REQUIRE_EQ(lo.rows[0].at("A"), std::string("&#xD800;"));
+	const Rowset hi = ParseRowset("<row><A>&#xDFFF;</A></row>");
+	REQUIRE_EQ(hi.rows[0].at("A"), std::string("&#xDFFF;"));
+
+	// A genuine astral character still encodes, so the guard is not over-broad.
+	const Rowset astral = ParseRowset("<row><A>&#x1F600;</A></row>");
+	const std::string v = astral.rows[0].at("A");
+	REQUIRE_EQ(v.size(), 4u);
+	REQUIRE_EQ(static_cast<unsigned char>(v[0]), 0xF0u);
+}
+
+TEST_CASE("an unmatched leading close tag does not silence the whole rowset") {
+	// depth was decremented with no floor, so a leading close tag drove it
+	// negative, row_depth went negative with it, every `row_depth >= 0` guard
+	// failed, and the function returned an EMPTY rowset with no error — which
+	// this layer documents as a MEANINGFUL answer ("no catalogs visible to this
+	// account"). A silent wrong answer, indistinguishable from a real one.
+	const Rowset rs = ParseRowset("</Bogus><row><A>1</A></row>");
+	REQUIRE_EQ(rs.size(), 1u);
+	REQUIRE_EQ(rs.rows[0].at("A"), std::string("1"));
+
+	const Rowset many = ParseRowset("</a></b></c><root><row><B>2</B></row></root>");
+	REQUIRE_EQ(many.size(), 1u);
+	REQUIRE_EQ(many.rows[0].at("B"), std::string("2"));
+}

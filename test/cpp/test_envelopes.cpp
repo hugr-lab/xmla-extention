@@ -173,13 +173,38 @@ TEST_CASE("a separator inside a literal or an identifier is not a separator") {
 	}
 }
 
+TEST_CASE("an unterminated block comment is refused, not read as empty") {
+	// SkipTrivia reports this and both call sites used to discard the report, so
+	// the batch guard accepted exactly the shape it exists to refuse. Whether a
+	// server treats the remainder as commented out or rejects the statement is
+	// its choice; this guard refuses the shape rather than assuming one.
+	REQUIRE_THROWS_EXACTLY(ProtocolError, Execute("EVALUATE Sales; /* UPDATE CUBE [S] SET (x) = 0", "", ""));
+	REQUIRE_THROWS_EXACTLY(ProtocolError, Execute("EVALUATE Sales /* ; UPDATE CUBE [S] SET (x) = 0", "", ""));
+	REQUIRE_THROWS_EXACTLY(ProtocolError, Execute("EVALUATE Sales /* unterminated", "", ""));
+
+	// A TERMINATED block comment carries nothing and stays legal.
+	Execute("EVALUATE Sales /* terminated */", "", "");
+	// A line comment running to end of input is a real comment in both MDX and
+	// DAX, so the rest genuinely is commented out. Not a bypass, and refusing it
+	// would reject legitimate input.
+	Execute("EVALUATE Sales; // UPDATE CUBE [S] SET (x) = 0", "", "");
+}
+
 TEST_CASE("the allowlist does not depend on the process locale") {
 	// ::toupper follows LC_CTYPE, and a DuckDB extension runs inside a host that
 	// may have called setlocale -- CPython does. Under tr_TR.UTF-8, toupper('i')
 	// is not 'I', so "with"/"define" would fold to "WiTH"/"DEFiNE" and a valid
 	// query would be refused. Keyword syntax is ASCII by definition.
-	const char *previous = setlocale(LC_CTYPE, nullptr);
-	const std::string saved = previous ? previous : "C";
+	// RAII, because a REQUIRE below throws: a plain restore statement would leave
+	// LC_CTYPE set to Turkish for every later case in the binary, turning one
+	// failure into a cascade through the redaction and parser cases.
+	struct LocaleGuard {
+		std::string saved;
+		explicit LocaleGuard(const char *p) : saved(p ? p : "C") {}
+		~LocaleGuard() {
+			setlocale(LC_CTYPE, saved.c_str());
+		}
+	} guard(setlocale(LC_CTYPE, nullptr));
 
 	// tr_TR.UTF-8 is not installed everywhere. When it is missing this case
 	// cannot demonstrate anything, and SAYING so matters: an earlier version
@@ -190,14 +215,16 @@ TEST_CASE("the allowlist does not depend on the process locale") {
 	//
 	// scripts/ci/check_locale_independence.sh is the deterministic guard. This
 	// case is the demonstration, and it is honest about when it cannot give one.
+	// GitHub's ubuntu-latest images generate only C, C.UTF-8 and en_US.UTF-8, so
+	// on the Linux legs this cannot demonstrate anything. Say so rather than
+	// reporting a pass that asserted nothing about the locale at all.
 	const bool switched = setlocale(LC_CTYPE, "tr_TR.UTF-8") != nullptr;
-	if (!switched) {
-		std::printf("        [tr_TR.UTF-8 unavailable; asserting the ASCII path only]\n");
-	}
+	std::printf(switched ? "        [tr_TR.UTF-8 in force]\n"
+						 : "        [tr_TR.UTF-8 unavailable; ASCII path only, see "
+						   "scripts/ci/check_locale_independence.sh for the real guard]\n");
 	const std::string env = Execute("with member [M] as 1 select {} on 0 from [S]", "", "");
 	REQUIRE(Has(env, "<Statement>"));
 	Execute("define var x = 1 evaluate ROW(\"a\", x)", "", "");
-	setlocale(LC_CTYPE, saved.c_str());
 }
 
 TEST_CASE("the refusal does not echo the statement back") {

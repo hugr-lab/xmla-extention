@@ -20,7 +20,10 @@
 set -euo pipefail
 
 # Files that build XMLA on the wire. Their parsing decides what reaches a server.
-targets="src/xmla/envelopes.cpp src/xmla/rowset.cpp"
+# redact.cpp folds case to match host/user literals — a constitution-I path, so
+# a fold that stops matching sends an unscrubbed literal into an error message.
+# gss_context.cpp folds the mechanism name, and "NEGOTIATE" contains an I.
+targets="src/xmla/envelopes.cpp src/xmla/rowset.cpp src/xmla/redact.cpp src/xmla/gss_context.cpp"
 
 pattern='(^|[^[:alnum:]_])(isalpha|isalnum|isupper|islower|isspace|isdigit|toupper|tolower)[[:space:]]*\('
 
