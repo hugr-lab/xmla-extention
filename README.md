@@ -77,12 +77,23 @@ CREATE SECRET ssas (TYPE xmla, MECHANISM 'ntlm', USER '...', PASSWORD '...');
 
 With a Kerberos ticket in the cache, supply nothing at all and the ambient identity is used.
 
-## Read-only, by construction
+## Read-only
 
-There is no operation in this extension that creates, alters, refreshes or deletes a
-server-side object — not gated, *absent*. There is no envelope builder for a mutating command,
-so no argument to any function can reach one, and a test asserts the absence structurally so
-the capability cannot arrive unnoticed.
+Two different guarantees, and the difference matters:
+
+- **Metadata is read-only by construction.** No envelope builder for a mutating command
+  exists, so no argument to any discovery function can reach one. A test asserts the absence
+  structurally.
+- **Statements are read-only by validation.** `xmla_execute` refuses anything whose first
+  significant keyword is not `SELECT`, `EVALUATE`, `WITH`, `DEFINE` or `VAR`. This is needed
+  because XMLA's `<Statement>` element carries the *whole* command surface — MDX writeback
+  (`UPDATE CUBE`), DMX (`INSERT INTO`, `DROP MINING MODEL`) and stored-procedure `CALL` all
+  travel through it, so removing a `Create`/`Alter` builder closes one route and not the
+  others.
+
+The second is a guard, not a proof. **Grant the connecting account read-only permissions on
+the server.** That is the only control that cannot be reasoned around, and no client-side
+check substitutes for it.
 
 ## Nothing identifying gets committed
 

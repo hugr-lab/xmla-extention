@@ -81,6 +81,15 @@ distinct from "access refused". That is why a response which does not decrypt to
 raise rather than parse to empty (FR-022): the likeliest cipher-layer failure produces
 exactly that indistinguishable emptiness.
 
+## Statement guard
+
+`Execute` refuses any statement whose first significant keyword is not `SELECT`, `EVALUATE`,
+`WITH`, `DEFINE` or `VAR`. Comments and whitespace are skipped to find that keyword, so a
+leading comment cannot hide one.
+
+The refusal names the offending keyword and **not** the statement, which is caller text that
+can reach a log.
+
 ## Error categories
 
 `Connection`, `Authentication`, `Authorization`, `Negotiation`, `Server`, `Protocol`, and

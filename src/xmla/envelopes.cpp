@@ -2,6 +2,9 @@
 
 #include "xmla/errors.hpp"
 
+#include <algorithm>
+#include <cctype>
+
 namespace xmla {
 namespace envelopes {
 
@@ -106,7 +109,72 @@ std::string Discover(const std::string &request_type, const Restrictions &restri
 		   "</PropertyList></Properties></Discover></Body></Envelope>";
 }
 
+void RejectIfMutating(const std::string &statement) {
+	// Skip whitespace and comments to find the first significant token. Comments
+	// are skipped rather than rejected because a query may legitimately begin
+	// with one; skipping them is what stops "/*x*/ UPDATE CUBE" from reading as
+	// an unrecognised keyword and being refused for the wrong reason -- and, more
+	// to the point, from being ACCEPTED if the allowlist were applied to the raw
+	// first characters.
+	size_t i = 0;
+	for (;;) {
+		while (i < statement.size() && isspace(static_cast<unsigned char>(statement[i]))) {
+			i++;
+		}
+		if (statement.compare(i, 2, "//") == 0) {
+			const size_t nl = statement.find('\n', i);
+			if (nl == std::string::npos) {
+				break;
+			}
+			i = nl + 1;
+			continue;
+		}
+		if (statement.compare(i, 2, "/*") == 0) {
+			const size_t close = statement.find("*/", i + 2);
+			if (close == std::string::npos) {
+				break;
+			}
+			i = close + 2;
+			continue;
+		}
+		if (statement.compare(i, 2, "--") == 0) {
+			const size_t nl = statement.find('\n', i);
+			if (nl == std::string::npos) {
+				break;
+			}
+			i = nl + 1;
+			continue;
+		}
+		break;
+	}
+
+	size_t end = i;
+	while (end < statement.size() && (isalpha(static_cast<unsigned char>(statement[end])) || statement[end] == '_')) {
+		end++;
+	}
+	std::string keyword = statement.substr(i, end - i);
+	std::transform(keyword.begin(), keyword.end(), keyword.begin(),
+				   [](unsigned char c) { return static_cast<char>(::toupper(c)); });
+
+	// The complete set of statement forms this extension will send. MDX queries
+	// start SELECT or WITH; DAX queries start EVALUATE, DEFINE or VAR.
+	static const char *const kQueryKeywords[] = {"SELECT", "EVALUATE", "WITH", "DEFINE", "VAR"};
+	for (const char *allowed : kQueryKeywords) {
+		if (keyword == allowed) {
+			return;
+		}
+	}
+
+	// The statement is NOT echoed back. It is caller text and this message can
+	// reach a log; the keyword alone is enough to act on.
+	throw ProtocolError(
+		"this extension sends only read-only statements, and the statement does not "
+		"begin with SELECT, EVALUATE, WITH, DEFINE or VAR" +
+		(keyword.empty() ? std::string() : std::string(" (it begins with ") + keyword + ")"));
+}
+
 std::string Execute(const std::string &statement, const std::string &catalog, const std::string &session_id) {
+	RejectIfMutating(statement);
 	return std::string("<Envelope xmlns=\"") + SOAP_NS + "\">" + SessionHeader(session_id) + "<Body><Execute xmlns=\"" +
 		   XMLA_NS + "\"><Command><Statement>" + XmlEscape(statement) +
 		   "</Statement></Command><Properties><PropertyList>" + Properties(catalog) +

@@ -42,8 +42,17 @@ Restriction **names** are validated against the XMLA rowset column shape rather 
 an element name cannot be made safe by escaping, so an invalid one is rejected. Restriction
 **values** are escaped.
 
-`xmla_execute` runs a read-only analytic statement. There is no builder for a mutating
-command anywhere in the envelope layer, so no argument to this function can reach one.
+`xmla_execute` runs a read-only analytic statement, and **validates it**: the first
+significant keyword must be `SELECT`, `EVALUATE`, `WITH`, `DEFINE` or `VAR`, and anything else
+is refused.
+
+That check is necessary because the absence of a mutating envelope builder does not make this
+path read-only. XMLA's `<Statement>` carries the whole command surface: MDX writeback
+(`UPDATE CUBE`), DMX (`INSERT INTO`, `DELETE FROM`, `DROP MINING MODEL`) and stored-procedure
+`CALL` all travel through it.
+
+It is a guard, not a proof. **Grant the connecting account read-only permissions on the
+server**; that is the only control that cannot be reasoned around.
 
 ## Errors
 
