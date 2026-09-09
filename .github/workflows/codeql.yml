@@ -8,6 +8,11 @@ on:
       - '**.cpp'
       - '**.hpp'
       - 'CMakeLists.txt'
+      # Its own file, so a change to HOW the analysis is built is verified by
+      # running it. Without this, the PR that fixed the build-target scoping
+      # could not trigger CodeQL at all, and "no CodeQL comments" on it carried
+      # no information. kerberos.yml lists itself for the same reason.
+      - '.github/workflows/codeql.yml'
   schedule:
     - cron: '0 4 * * 2'
 
