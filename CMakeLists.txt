@@ -130,5 +130,14 @@ add_executable(xmla_test ${XMLA_TEST_SOURCES})
 target_include_directories(xmla_test PRIVATE test/cpp)
 target_link_libraries(xmla_test xmla_protocol)
 
+# =============================================================================
+# The spike. Proves the risky path end to end against a live instance before any
+# DuckDB integration exists. Needs GSSAPI; skipped when it is absent.
+# =============================================================================
+if(XMLA_GSS_FOUND)
+    add_executable(xmla_probe tools/xmla_probe.cpp)
+    target_link_libraries(xmla_probe xmla_gss xmla_protocol)
+endif()
+
 enable_testing()
 add_test(NAME xmla_protocol_tests COMMAND xmla_test)

@@ -96,3 +96,18 @@ TEST_CASE("scrubbing empty text is not an error") {
 	Scrubber scrub("h", "u", "r");
 	REQUIRE_EQ(scrub(""), std::string(""));
 }
+
+TEST_CASE("a MACHINE\\INSTANCE datasource name is scrubbed") {
+	// DISCOVER_DATASOURCES answers with the instance's own DataSourceName, which
+	// on a standalone box is the machine name and the instance name. The first
+	// run of the live probe printed one to a terminal, which is why row values
+	// are scrubbed on output and not only on faults.
+	Scrubber scrub;
+	// SYNTHETIC. The value observed on the live fixture must not be written here
+	// even split across concatenations: assembling it would evade the gate while
+	// still committing a real machine name, which is the exact failure
+	// constitution I describes. The pattern is what is under test, not the name.
+	const std::string sample = std::string("WIN") + "-A1B2C3D4E5" + "\\ INSTANCE";
+	const std::string out = scrub(sample);
+	REQUIRE(!Has(out, "A1B2C3D4E5"));
+}
