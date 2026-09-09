@@ -25,7 +25,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: clang-format
         run: |
@@ -66,7 +66,7 @@ jobs:
             runner: macos-14
             require_gss: 'OFF'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install GSSAPI (linux)
         if: matrix.os.id == 'linux'
@@ -95,7 +95,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - run: sudo apt-get update && sudo apt-get install -y libkrb5-dev gss-ntlmssp ninja-build
       # The DIME decoder and the sealed-frame reader consume bytes from a remote
       # peer. The unit suite feeds them truncated and malformed input on purpose,
