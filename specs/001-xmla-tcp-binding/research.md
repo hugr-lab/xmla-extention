@@ -150,6 +150,13 @@ enctype, keeps DATA at plaintext length, encrypts in place, and round-trips.
 Measured at payloads of 1, 3, 60, 563, 2888, 4096 and 65000 bytes; DATA was length-preserving
 at every size and PADDING was zero at every size.
 
+**A note on the method**: the probes assert "the ciphertext differs from the plaintext" only
+from 8 bytes up. Below that it is a coin flip rather than a measurement — a 1-byte ciphertext
+coincides with its plaintext once in 256 runs, and it duly did in CI, reporting
+`NOT-ENCRYPTED` for aes128-cts-hmac-sha1-96 and failing the job. The small sizes still assert
+length-preservation and the round-trip, which are deterministic and are what the frame
+actually depends on.
+
 **Three findings**:
 
 1. **Padding is zero for every AES enctype.** The reference implementation refuses a padding

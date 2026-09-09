@@ -114,7 +114,17 @@ int main(int argc, char **argv) {
 		size_t h = iov[0].buffer.length, d = iov[1].buffer.length, p = iov[2].buffer.length, t = iov[3].buffer.length;
 		if (p) pad_seen = 1;
 		int len_ok = (d == plen);
-		int enc_ok = memcmp(iov[1].buffer.value, orig, plen) != 0;
+		/* "Did it encrypt?" is a byte-inequality test, and for a TINY payload that
+		 * is a coin flip, not a measurement: with 1 byte the ciphertext coincides
+		 * with the plaintext once in 256 runs. It duly did, in CI, and reported
+		 * NOT-ENCRYPTED for aes128-cts-hmac-sha1-96 — an alarm about the
+		 * mechanism caused entirely by the size of the sample.
+		 *
+		 * Only assert it from 8 bytes up, where a coincidence is 2^-64. The small
+		 * sizes still assert length-preservation and the round-trip, which are
+		 * deterministic and are what the frame actually depends on. */
+		int enc_checked = (plen >= 8);
+		int enc_ok = !enc_checked || memcmp(iov[1].buffer.value, orig, plen) != 0;
 		if (!len_ok || !enc_ok) ok = 0;
 
 		/* unwrap through the acceptor, reassembled the way the frame reader will */
@@ -129,7 +139,9 @@ int main(int argc, char **argv) {
 		if (!rt) ok = 0;
 
 		printf("%-6zu %-8zu %-8zu %-8zu %-8zu %-8zu %s%s%s\n", plen, h, d, p, t, h + d + p + t,
-		       len_ok ? "len-ok " : "LEN-CHANGED ", enc_ok ? "enc-ok " : "NOT-ENCRYPTED ", rt ? "rt-ok" : "RT-FAILED");
+		       len_ok ? "len-ok " : "LEN-CHANGED ",
+		       enc_checked ? (enc_ok ? "enc-ok " : "NOT-ENCRYPTED ") : "enc-n/a ",
+		       rt ? "rt-ok" : "RT-FAILED");
 		free(data); free(orig);
 	}
 

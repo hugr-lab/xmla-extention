@@ -84,9 +84,12 @@ int main(void) {
 		maj = gss_wrap(&min, cctx, 1, GSS_C_QOP_DEFAULT, &in, &conf, &out);
 		if (maj) bail("gss_wrap", maj, min);
 		size_t overhead = out.length - plen;
-		int tail_is_ct = memcmp((char *)out.value + overhead, plain, plen) != 0;
+		/* Same reasoning as the Kerberos probe: for a 1-byte payload this is a
+		 * 1-in-256 coin flip, not a measurement. Only assert it from 8 bytes up. */
+		int ct_checked = (plen >= 8);
+		int tail_is_ct = !ct_checked || memcmp((char *)out.value + overhead, plain, plen) != 0;
 		printf("plain=%-5zu wrapped=%-5zu overhead=%-3zu conf=%d  tail!=plain:%s  head: %02x %02x %02x %02x\n",
-		       plen, (size_t)out.length, overhead, conf, tail_is_ct ? "yes" : "NO",
+		       plen, (size_t)out.length, overhead, conf, ct_checked ? (tail_is_ct ? "yes" : "NO") : "n/a",
 		       ((unsigned char *)out.value)[0], ((unsigned char *)out.value)[1],
 		       ((unsigned char *)out.value)[2], ((unsigned char *)out.value)[3]);
 		if (overhead != 16 || !tail_is_ct) ok = 0;
