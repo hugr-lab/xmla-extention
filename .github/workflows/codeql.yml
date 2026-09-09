@@ -28,9 +28,25 @@ jobs:
         with:
           languages: c-cpp
           queries: security-and-quality
-          config-file: ./.github/codeql/codeql-config.yml
 
       - run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
-      - run: cmake --build build
+
+      # Build ONLY the shipped targets. For a compiled language CodeQL analyses
+      # exactly what the build compiles, so this — not paths-ignore — is how test
+      # code is kept out of the database.
+      #
+      # paths-ignore was tried first and does not work here: it is honoured for
+      # interpreted languages, and for C++ the config was read, the augmented
+      # file showed the setting, and the analysis still returned all 90 test
+      # findings. Every TEST_CASE expands to a static registered through a
+      # function pointer, which CodeQL cannot follow, so each one reports as an
+      # unreachable static — 90 findings that will never be actionable.
+      #
+      # src/ and tools/ stay fully analysed, which is the point: the same query
+      # found a real defect there (two ASCII helpers with no call sites, because
+      # a locale fix had silently failed to apply). Excluding the query
+      # repo-wide would have thrown that away; excluding the test TARGET does
+      # not.
+      - run: cmake --build build --target xmla_protocol xmla_gss xmla_probe
 
       - uses: github/codeql-action/analyze@v3
