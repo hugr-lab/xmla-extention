@@ -43,6 +43,12 @@ jobs:
       - name: Leak gate over every tracked file
         run: LEAK_GATE_FILES_CMD="git ls-files" .githooks/pre-commit
 
+      # The gate has failed in three ways that all looked like working: scanning
+      # the working tree while listing from the index, an EXIT trap that made
+      # every run exit 1, and an OID read as an address. It gets its own tests.
+      - name: Leak gate regression tests
+        run: ./test/hooks/test_leak_gate.sh
+
       - name: The protocol layer stays free of DuckDB and of GSSAPI
         run: scripts/ci/check_layering.sh
 
