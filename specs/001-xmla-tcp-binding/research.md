@@ -282,3 +282,38 @@ build. That still serves its purpose — catching BSD/Linux socket divergence in
 because the protocol layer links no security library at all. `-DXMLA_REQUIRE_GSS=OFF` builds
 exactly that target set, and constitution III already requires the suite to pass on a machine
 that has never contacted an instance; it now also passes on one that has never had Kerberos.
+
+---
+
+## D12 — The NTLM path is verified end to end, in C++, against a live instance
+
+**Status**: settled by a live run, 2026-09-09.
+
+The spike (`tools/xmla_probe.cpp`) completed the whole path — TCP connect, DIME negotiation of
+`text/xml`, the `Authenticate`/`AuthenticateResponse` loop, a sealed `Discover`, rowset parse
+— against SQL Server 2022 Analysis Services on both a tabular and a multidimensional named
+instance.
+
+| request | rows | matches the reference implementation's recorded run |
+|---|---|---|
+| `DISCOVER_DATASOURCES` | 1 | yes |
+| `DBSCHEMA_CATALOGS` | 1 | yes |
+| `DBSCHEMA_TABLES` | 127 | yes |
+| `DBSCHEMA_COLUMNS` | 1366 | yes |
+
+1366 rows is past the sealed-frame, DIME-chunking and TCP-fragmentation thresholds at once,
+which is why it is the number worth recording.
+
+The provider that carried it was **`gss_wrap` with a derived token split** — the one that only
+exists because D4 refuted the `gss_wrap_iov` premise. Had that assumption gone unchecked, this
+run would have failed at the first sealed message, with the server closing the connection and
+logging nothing.
+
+**A defect this found, in the probe rather than the protocol**: `DISCOVER_DATASOURCES` answers
+with the instance's own `DataSourceName`, which on a standalone box is `MACHINE\INSTANCE`. The
+first run printed a real machine name to the terminal. Row *values* are now scrubbed on
+output, not only fault text — anything a probe prints can be pasted into an issue.
+
+**Still UNVERIFIED after this run**: everything Kerberos. The fixture is a standalone workgroup
+machine, so its SSAS speaks NTLM only and no amount of live testing against it can settle D5's
+token-layout question or D8's SPN form.
