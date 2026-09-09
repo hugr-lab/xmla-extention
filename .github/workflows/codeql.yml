@@ -28,6 +28,7 @@ jobs:
         with:
           languages: c-cpp
           queries: security-and-quality
+          config-file: ./.github/codeql/codeql-config.yml
 
       - run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
       - run: cmake --build build

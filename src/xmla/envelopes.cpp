@@ -41,6 +41,26 @@ std::string XmlEscape(const std::string &in) {
 
 namespace {
 
+//! ASCII-only case fold and classification.
+//!
+//! ::toupper and isalpha follow the global LC_CTYPE, and a DuckDB extension is
+//! loaded into a host process that may well have called setlocale(LC_CTYPE, "")
+//! -- CPython does, and so does R. Under tr_TR.UTF-8, toupper('i') is not 'I',
+//! so a lower-case "with member ... select ..." folds to "WiTH" and a
+//! legitimate query is refused. Keyword syntax here is ASCII by definition, so
+//! the locale has no business in it.
+static char AsciiUpper(char c) {
+	return (c >= 'a' && c <= 'z') ? static_cast<char>(c - 'a' + 'A') : c;
+}
+
+static bool AsciiAlpha(char c) {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+}
+
+static bool AsciiSpace(char c) {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v';
+}
+
 //! Restriction names are XMLA rowset column names: letter or underscore, then
 //! letters, digits and underscores.
 //!
@@ -53,12 +73,14 @@ bool IsValidRestrictionName(const std::string &name) {
 	if (name.empty() || name.size() > 128) {
 		return false;
 	}
+	// ASCII-only, for the same reason as the keyword fold below: an XMLA rowset
+	// column name is ASCII by definition, and isalpha/isalnum follow LC_CTYPE.
 	const char first = name[0];
-	if (!(isalpha(static_cast<unsigned char>(first)) || first == '_')) {
+	if (!(AsciiAlpha(first) || first == '_')) {
 		return false;
 	}
 	for (char c : name) {
-		if (!(isalnum(static_cast<unsigned char>(c)) || c == '_')) {
+		if (!(AsciiAlpha(c) || (c >= '0' && c <= '9') || c == '_')) {
 			return false;
 		}
 	}
@@ -107,26 +129,6 @@ std::string Discover(const std::string &request_type, const Restrictions &restri
 		   "</RequestType><Restrictions><RestrictionList>" + RestrictionList(restrictions) +
 		   "</RestrictionList></Restrictions><Properties><PropertyList>" + Properties(catalog) +
 		   "</PropertyList></Properties></Discover></Body></Envelope>";
-}
-
-//! ASCII-only case fold and classification.
-//!
-//! ::toupper and isalpha follow the global LC_CTYPE, and a DuckDB extension is
-//! loaded into a host process that may well have called setlocale(LC_CTYPE, "")
-//! -- CPython does, and so does R. Under tr_TR.UTF-8, toupper('i') is not 'I',
-//! so a lower-case "with member ... select ..." folds to "WiTH" and a
-//! legitimate query is refused. Keyword syntax here is ASCII by definition, so
-//! the locale has no business in it.
-static char AsciiUpper(char c) {
-	return (c >= 'a' && c <= 'z') ? static_cast<char>(c - 'a' + 'A') : c;
-}
-
-static bool AsciiAlpha(char c) {
-	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
-}
-
-static bool AsciiSpace(char c) {
-	return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v';
 }
 
 //! Advance past whitespace and comments starting at `i`. Returns false if the
@@ -239,44 +241,14 @@ void RejectIfMutating(const std::string &statement) {
 	// to the point, from being ACCEPTED if the allowlist were applied to the raw
 	// first characters.
 	size_t i = 0;
-	for (;;) {
-		while (i < statement.size() && isspace(static_cast<unsigned char>(statement[i]))) {
-			i++;
-		}
-		if (statement.compare(i, 2, "//") == 0) {
-			const size_t nl = statement.find('\n', i);
-			if (nl == std::string::npos) {
-				break;
-			}
-			i = nl + 1;
-			continue;
-		}
-		if (statement.compare(i, 2, "/*") == 0) {
-			const size_t close = statement.find("*/", i + 2);
-			if (close == std::string::npos) {
-				break;
-			}
-			i = close + 2;
-			continue;
-		}
-		if (statement.compare(i, 2, "--") == 0) {
-			const size_t nl = statement.find('\n', i);
-			if (nl == std::string::npos) {
-				break;
-			}
-			i = nl + 1;
-			continue;
-		}
-		break;
-	}
+	SkipTrivia(statement, i);
 
 	size_t end = i;
-	while (end < statement.size() && (isalpha(static_cast<unsigned char>(statement[end])) || statement[end] == '_')) {
+	while (end < statement.size() && (AsciiAlpha(statement[end]) || statement[end] == '_')) {
 		end++;
 	}
 	std::string keyword = statement.substr(i, end - i);
-	std::transform(keyword.begin(), keyword.end(), keyword.begin(),
-				   [](unsigned char c) { return static_cast<char>(::toupper(c)); });
+	std::transform(keyword.begin(), keyword.end(), keyword.begin(), AsciiUpper);
 
 	// The complete set of statement forms this extension will send. MDX queries
 	// start SELECT or WITH; DAX queries start EVALUATE, DEFINE or VAR.

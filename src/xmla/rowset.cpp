@@ -7,6 +7,14 @@ namespace xmla {
 
 namespace {
 
+//! XML whitespace is exactly these four characters (XML 1.0 §2.3), so this is
+//! not merely locale-independence -- it is the correct definition. isspace()
+//! follows LC_CTYPE and in some locales accepts more, which would let a byte XML
+//! does not treat as whitespace end a tag name here.
+bool XmlSpace(char c) {
+	return c == ' ' || c == '\t' || c == '\r' || c == '\n';
+}
+
 //! Local name of a possibly-prefixed tag: "urn:x:row" and "r:row" both give "row".
 std::string LocalName(const std::string &qname) {
 	const size_t colon = qname.rfind(':');
@@ -156,7 +164,7 @@ bool NextTag(const std::string &s, size_t from, Tag &tag) {
 			p++;
 		}
 		const size_t name_start = p;
-		while (p < gt && !isspace(static_cast<unsigned char>(s[p])) && s[p] != '/' && s[p] != '>') {
+		while (p < gt && !XmlSpace(s[p]) && s[p] != '/' && s[p] != '>') {
 			p++;
 		}
 		tag.qname = s.substr(name_start, p - name_start);
@@ -325,9 +333,9 @@ bool FindAttribute(const std::string &text, const std::string &local_name, const
 		size_t at = 0;
 		while ((at = attrs.find(attribute, at)) != std::string::npos) {
 			// Must be a whole attribute name, not a suffix of a longer one.
-			const bool left_ok = (at == 0) || isspace(static_cast<unsigned char>(attrs[at - 1]));
+			const bool left_ok = (at == 0) || XmlSpace(attrs[at - 1]);
 			size_t after = at + attribute.size();
-			while (after < attrs.size() && isspace(static_cast<unsigned char>(attrs[after]))) {
+			while (after < attrs.size() && XmlSpace(attrs[after])) {
 				after++;
 			}
 			if (!left_ok || after >= attrs.size() || attrs[after] != '=') {
@@ -335,7 +343,7 @@ bool FindAttribute(const std::string &text, const std::string &local_name, const
 				continue;
 			}
 			after++;
-			while (after < attrs.size() && isspace(static_cast<unsigned char>(attrs[after]))) {
+			while (after < attrs.size() && XmlSpace(attrs[after])) {
 				after++;
 			}
 			if (after >= attrs.size() || (attrs[after] != '"' && attrs[after] != '\'')) {
