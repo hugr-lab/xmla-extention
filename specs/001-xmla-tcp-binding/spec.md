@@ -208,6 +208,21 @@ MIT KDC rather than against SSAS.
   deletes a server-side object. The attached catalog MUST refuse DDL and DML rather than
   translating them, and no `COPY TO`, `INSERT`, `UPDATE`, `DELETE` or `CREATE` path may be
   registered.
+- **FR-028a**: The `Execute` path MUST validate the statement against an **allowlist** of
+  query keywords and refuse anything else. This is a different and weaker guarantee than
+  FR-028, and the difference is load-bearing: the XMLA `<Statement>` element is the entry
+  point to the entire command surface, so MDX writeback (`UPDATE CUBE`), DMX (`INSERT INTO`,
+  `DELETE FROM`, `DROP MINING MODEL`) and stored-procedure `CALL` all reach the server
+  through it. Absence of a `Create`/`Alter` envelope builder removes one route to mutation
+  and not the others.
+- **FR-028b**: The statement guard MUST be an allowlist rather than a denylist. The set of
+  ways to mutate through `<Statement>` is open-ended and server-version-dependent; the set of
+  ways to ask a question is small and stable. A denylist would have to be complete to be
+  worth anything.
+- **FR-028c**: The guard MUST NOT be presented as sufficient. Granting the connecting account
+  read-only permissions on the server is the only control that cannot be reasoned around, and
+  the documentation MUST say so rather than implying the client alone makes mutation
+  impossible.
 - **FR-029**: Failures MUST be reported in categories a caller can act on without parsing
   message text: connection, authentication, authorization, negotiation, server, protocol.
 - **FR-030**: No error message, log line or exception may contain a hostname, address,
@@ -241,8 +256,15 @@ MIT KDC rather than against SSAS.
 - **SC-004**: No committed file contains a hostname, address, account name, realm, SPN,
   machine name or security identifier, enforced by a gate that runs on every commit and scans
   every tracked file including binaries.
-- **SC-005**: No code path exists through which the extension can mutate server state,
-  asserted structurally rather than by inspection.
+- **SC-005**: No *envelope builder* for a mutating command exists, asserted structurally
+  rather than by inspection; and every statement reaching `Execute` is checked against a query
+  allowlist, asserted by tests that feed it MDX writeback, DMX and `CALL` and require refusal.
+
+  An earlier version of this criterion read "no code path exists through which the extension
+  can mutate server state". That was false and the test that appeared to support it could not
+  have failed: it asserted only that the emitted envelope lacked the literals `<Create`,
+  `<Alter`, `<Delete` and `<Refresh`, none of which appear in any MDX or DMX mutation. The
+  criterion is now split because the two halves have genuinely different strengths.
 - **SC-006**: Every protocol claim in the documentation is either cited to a Microsoft Open
   Specification, backed by a committed fixture or a reproducible experiment, or marked
   UNVERIFIED.

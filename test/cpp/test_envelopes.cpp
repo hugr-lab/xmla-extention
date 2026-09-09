@@ -53,8 +53,11 @@ TEST_CASE("restriction NAMES are rejected, not escaped") {
 }
 
 TEST_CASE("the catalog and the statement are escaped") {
-	REQUIRE(Has(Execute("a < b", "Cat&Dog", ""), "<Statement>a &lt; b</Statement>"));
-	REQUIRE(Has(Execute("x", "Cat&Dog", ""), "<Catalog>Cat&amp;Dog</Catalog>"));
+	// A real query that still contains characters needing escaping: comparison
+	// operators and ampersands are ordinary in both MDX and DAX.
+	REQUIRE(
+		Has(Execute("EVALUATE FILTER(T, [a] < 5)", "", ""), "<Statement>EVALUATE FILTER(T, [a] &lt; 5)</Statement>"));
+	REQUIRE(Has(Execute("EVALUATE T", "Cat&Dog", ""), "<Catalog>Cat&amp;Dog</Catalog>"));
 }
 
 TEST_CASE("an escaped envelope survives a round-trip through the parser") {
@@ -67,14 +70,84 @@ TEST_CASE("an escaped envelope survives a round-trip through the parser") {
 }
 
 TEST_CASE("there is no builder for a mutating command") {
-	// Constitution II is absence of capability, not a gate. This asserts the
-	// header's surface: if a Create/Alter/Delete/Refresh builder is ever added,
-	// this test is the thing that has to be deleted to make it compile away -
-	// which is a review event rather than a silent one.
+	// Discover is read-only BY CONSTRUCTION: no builder exists, so no argument
+	// reaches one. This asserts the surface; adding a Create/Alter builder would
+	// require deleting this test, which is a review event rather than a silent
+	// one.
+	//
+	// Note what this does NOT prove. An earlier version of this test was the
+	// ONLY evidence for "read-only by construction" covering Execute as well,
+	// and it could not have failed: no MDX or DMX mutation contains the literal
+	// "<Create". Execute is covered by the cases below instead.
 	const std::string env = Execute("EVALUATE ROW(\"x\", 1)", "", "");
 	REQUIRE(Has(env, "<Statement>"));
 	REQUIRE(!Has(env, "<Create"));
 	REQUIRE(!Has(env, "<Alter"));
 	REQUIRE(!Has(env, "<Delete"));
 	REQUIRE(!Has(env, "<Refresh"));
+}
+
+TEST_CASE("Execute refuses a statement that mutates the server") {
+	// <Statement> is the entry point to the WHOLE command surface, not just to
+	// queries. Every one of these builds a well-formed envelope that a server
+	// would accept and apply, through a path the spec used to claim did not
+	// exist.
+	const char *mutating[] = {
+		"UPDATE CUBE [Sales] SET ([Measures].[Amount]) = 0",  // MDX writeback
+		"INSERT INTO [Model] (col) VALUES (1)",				  // DMX
+		"DELETE FROM [Mining Model].CONTENT",				  // DMX
+		"DROP MINING MODEL [M]",							  // DMX
+		"CREATE MINING MODEL [M] ([k] LONG KEY)",			  // DMX
+		"ALTER CUBE [Sales] ...",							  // MDX
+		"CALL SystemRestoreBackup('x')",					  // stored procedure
+		"REFRESH CUBE [Sales]",
+		"BACKUP DATABASE [Model] TO 'x.abf'",
+		"RESTORE DATABASE [Model] FROM 'x.abf'",
+	};
+	for (const char *stmt : mutating) {
+		REQUIRE_THROWS_EXACTLY(ProtocolError, Execute(stmt, "", ""));
+	}
+}
+
+TEST_CASE("Execute accepts the query forms, in any casing and with leading trivia") {
+	// The allowlist must not be so tight that it refuses real queries.
+	const char *queries[] = {
+		"SELECT {} ON 0 FROM [Sales]",
+		"select {} on 0 from [Sales]",
+		"  \t\n EVALUATE Sales",
+		"WITH MEMBER [Measures].[X] AS 1 SELECT {} ON 0 FROM [Sales]",
+		"DEFINE VAR x = 1 EVALUATE ROW(\"a\", x)",
+		"VAR x = 1 RETURN x",
+		"// a comment first\nEVALUATE Sales",
+		"/* block */ EVALUATE Sales",
+		"-- dashes\nEVALUATE Sales",
+	};
+	for (const char *stmt : queries) {
+		const std::string env = Execute(stmt, "", "");
+		REQUIRE(Has(env, "<Statement>"));
+	}
+}
+
+TEST_CASE("a comment cannot hide a mutating keyword from the allowlist") {
+	// Comments are SKIPPED to find the first significant token, not merely
+	// tolerated at position zero. Checking the raw first characters instead
+	// would let "/*x*/ UPDATE CUBE" through.
+	REQUIRE_THROWS_EXACTLY(ProtocolError, Execute("/* EVALUATE */ UPDATE CUBE [S] SET (x) = 0", "", ""));
+	REQUIRE_THROWS_EXACTLY(ProtocolError, Execute("// EVALUATE\nDROP MINING MODEL [M]", "", ""));
+	REQUIRE_THROWS_EXACTLY(ProtocolError, Execute("   \n\t  CALL Something()", "", ""));
+}
+
+TEST_CASE("the refusal does not echo the statement back") {
+	// The statement is caller text and the message can reach a log.
+	bool threw = false;
+	try {
+		Execute("UPDATE CUBE [Secret Cube Name] SET ([Measures].[Salary]) = 0", "", "");
+	} catch (const ProtocolError &e) {
+		threw = true;
+		const std::string what = e.what();
+		REQUIRE(!Has(what, "Secret Cube Name"));
+		REQUIRE(!Has(what, "Salary"));
+		REQUIRE(Has(what, "UPDATE"));  // the keyword alone is enough to act on
+	}
+	REQUIRE(threw);
 }
