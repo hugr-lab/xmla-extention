@@ -113,9 +113,18 @@ make
 The hermetic protocol tests need no security library and no server:
 
 ```bash
-cmake -S . -B build/test -DXMLA_REQUIRE_GSS=OFF && cmake --build build/test
-./build/test/xmla_test
+make test-protocol
 ```
+
+Everything CI enforces, before pushing:
+
+```bash
+make check
+```
+
+`make format` reformats with the **same clang-format CI pins** (14, via a
+container). Newer versions disagree with it, so formatting with whatever is on
+your machine can produce a diff that only fails once pushed.
 
 ## Documentation
 

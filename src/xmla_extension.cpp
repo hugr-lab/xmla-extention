@@ -32,7 +32,7 @@ std::string XmlaExtension::Version() const {
 #endif
 }
 
-} // namespace duckdb
+}  // namespace duckdb
 
 extern "C" {
 
