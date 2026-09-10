@@ -51,6 +51,45 @@ Bytes SealFrame(SealProvider &provider, const Bytes &payload);
 //! provider's chunk size.
 Bytes SealMessage(SealProvider &provider, const Bytes &payload);
 
+//! Decrypt a sealed response frame by frame, as its bytes arrive.
+//!
+//! The frames of one message may be split across DIME records and across TCP
+//! reads, so a streaming reader has to hold a partial frame between feeds. That
+//! is all this is: a buffer plus the frame loop that UnsealMessage used to run
+//! inline. UnsealMessage is implemented on it, so there is one frame loop rather
+//! than two that can disagree.
+class Unsealer {
+public:
+	explicit Unsealer(SealProvider &provider) : provider_(provider) {}
+
+	//! Feed ciphertext; get back whatever plaintext completed. The leading UTF-8
+	//! BOM is stripped here, once, however the frames happen to be divided.
+	Bytes Append(const uint8_t *data, size_t size);
+	Bytes Append(const Bytes &data) {
+		return Append(data.data(), data.size());
+	}
+
+	//! No more bytes will arrive. A partial frame left over is an error, and
+	//! WHICH error matters: see UnsealMessage below.
+	void Finish();
+
+	//! Settle the BOM question and release whatever was held back for it.
+	//!
+	//! Needed because a plaintext SHORTER than the BOM leaves the question open
+	//! for ever, and silently dropping those bytes would be a truncation with no
+	//! error - the failure mode this whole layer is written against.
+	Bytes Flush();
+
+private:
+	SealProvider &provider_;
+	Bytes buffer_;
+	//! The BOM arrives as its own frame, but a frame boundary is not a promise:
+	//! this holds back up to BOM_LEN bytes until it is known whether they are
+	//! the preamble or the start of the document.
+	Bytes head_;
+	bool bom_settled_ = false;
+};
+
 //! Decrypt every frame in a sealed response and concatenate the plaintext.
 //!
 //! A buffer that ends mid-frame throws IncompleteMessage, never ProtocolError.

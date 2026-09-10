@@ -6,6 +6,7 @@
 
 #include <memory>
 #include <string>
+#include <vector>
 
 using namespace xmla;
 
@@ -56,7 +57,7 @@ TEST_CASE("a session opens, authenticates, and returns rows") {
 
 	const Rowset rs = session.Discover("DBSCHEMA_CATALOGS");
 	REQUIRE_EQ(rs.size(), 2u);
-	REQUIRE_EQ(rs.rows[0].at("CATALOG_NAME"), std::string("Catalog 0"));
+	REQUIRE_EQ(rs.Row(0).At("CATALOG_NAME"), std::string("Catalog 0"));
 }
 
 TEST_CASE("a request before authentication is refused as Authentication") {
@@ -245,10 +246,10 @@ TEST_CASE("T-031: sealed frames, DIME records and short reads compose") {
 	REQUIRE_EQ(rs.size(), 400u);
 	// Not just the count: the first, last and a middle row, so a reassembly that
 	// drops or duplicates a chunk in the middle cannot pass.
-	REQUIRE_EQ(rs.rows[0].at("CATALOG_NAME"), std::string("Catalog 0"));
-	REQUIRE_EQ(rs.rows[200].at("CATALOG_NAME"), std::string("Catalog 200"));
-	REQUIRE_EQ(rs.rows[399].at("CATALOG_NAME"), std::string("Catalog 399"));
-	REQUIRE_EQ(rs.rows[399].at("DESCRIPTION"), std::string("a description long enough to matter"));
+	REQUIRE_EQ(rs.Row(0).At("CATALOG_NAME"), std::string("Catalog 0"));
+	REQUIRE_EQ(rs.Row(200).At("CATALOG_NAME"), std::string("Catalog 200"));
+	REQUIRE_EQ(rs.Row(399).At("CATALOG_NAME"), std::string("Catalog 399"));
+	REQUIRE_EQ(rs.Row(399).At("DESCRIPTION"), std::string("a description long enough to matter"));
 	// The frames really were split: one BOM frame plus ceil(len/chunk).
 	REQUIRE(server_side.frames_sealed() > 100u);
 }
@@ -287,4 +288,118 @@ TEST_CASE("base64 round-trips, and rejects what it should") {
 	// Padding must be terminal: data after it is two encodings concatenated,
 	// which would decode to something the sender never wrote.
 	REQUIRE(!auth::Base64Decode("QQ==QQ==", out));
+}
+
+// --- the streaming cursor (T-042) -------------------------------------------
+
+static std::string EvaluateDocument(int rows) {
+	std::string doc =
+		"<Envelope><Body><ExecuteResponse><return>"
+		"<root xmlns=\"urn:schemas-microsoft-com:xml-analysis:rowset\">"
+		"<Session SessionId=\"SID-42\"/>";
+	for (int i = 0; i < rows; i++) {
+		doc += "<row><T_x005B_A_x005D_>" + std::to_string(i) + "</T_x005B_A_x005D_></row>";
+	}
+	doc += "</root></return></ExecuteResponse></Body></Envelope>";
+	return doc;
+}
+
+static std::shared_ptr<BytesChannel> AuthenticatedChannel(FakeSealProvider &server_side, const std::string &document,
+														  size_t record_bytes, size_t read_bytes) {
+	auto chan = std::make_shared<BytesChannel>();
+	chan->Queue(PlainResponseWire(kAuthResponse, 0));
+	chan->Queue(SealedResponseWire(server_side, document, record_bytes));
+	if (read_bytes) {
+		chan->SetChunkSize(read_bytes);
+	}
+	return chan;
+}
+
+TEST_CASE("a cursor yields the same rows as Execute, across record and read splits") {
+	// The three splitting layers compose (see fake_server.hpp), and a resumable
+	// reader is exactly where they stop being independent.
+	FakeSealProvider server_side(16, 512);
+	auto chan = AuthenticatedChannel(server_side, EvaluateDocument(50), 200, 37);
+
+	Session session(Target(), Credential());
+	session.Open(chan, std::unique_ptr<GssContext>(new FakeGssContext(1, 16, 512)));
+
+	auto cursor = session.ExecuteCursor("EVALUATE 'T'");
+	std::vector<Cell> row;
+	int seen = 0;
+	while (cursor->Next(row)) {
+		REQUIRE_EQ(row.size(), 1u);
+		REQUIRE_EQ(cursor->columns()[row[0].column], std::string("T[A]"));
+		REQUIRE_EQ(row[0].value, std::to_string(seen));
+		seen++;
+	}
+	REQUIRE_EQ(seen, 50);
+	REQUIRE(cursor->complete());
+}
+
+TEST_CASE("a cursor abandoned early leaves the rest of the response UNREAD") {
+	// This is the whole reason the cursor exists. DuckDB v2.0 passes no limit to
+	// a table function, so a `LIMIT 5` scan cannot ask the server for five rows;
+	// what it can do is stop reading, and that only saves anything if the
+	// remaining bytes are never pulled off the wire.
+	FakeSealProvider server_side(16, 512);
+	auto chan = AuthenticatedChannel(server_side, EvaluateDocument(400), 256, 64);
+
+	Session session(Target(), Credential());
+	session.Open(chan, std::unique_ptr<GssContext>(new FakeGssContext(1, 16, 512)));
+
+	{
+		auto cursor = session.ExecuteCursor("EVALUATE 'T'");
+		std::vector<Cell> row;
+		REQUIRE(cursor->Next(row));
+		REQUIRE_EQ(row[0].value, std::string("0"));
+		REQUIRE(!cursor->complete());
+		REQUIRE(chan->unread() > 0);
+	}
+	// Still unread after the cursor went away: it abandoned the message rather
+	// than draining it.
+	REQUIRE(chan->unread() > 0);
+	// And the session is unusable, deliberately: half a DIME message has been
+	// taken off the socket and there is no way back to a record boundary.
+	REQUIRE(session.state() == State::FAILED);
+	REQUIRE_THROWS_EXACTLY(AuthenticationError, session.Discover("DBSCHEMA_CATALOGS"));
+}
+
+TEST_CASE("a fault in a streamed response is raised, not returned as zero rows") {
+	// An empty rowset is a MEANINGFUL answer in this layer, so a refusal that
+	// arrives looking like one is a silent wrong answer.
+	const char *fault =
+		"<soap:Envelope><soap:Body><soap:Fault>"
+		"<faultcode>XMLAnalysisError.0xc10e0002</faultcode>"
+		"<faultstring>The user does not have permission.</faultstring>"
+		"</soap:Fault></soap:Body></soap:Envelope>";
+	FakeSealProvider server_side(16, 512);
+	auto chan = AuthenticatedChannel(server_side, fault, 0, 0);
+
+	Session session(Target(), Credential());
+	session.Open(chan, std::unique_ptr<GssContext>(new FakeGssContext(1, 16, 512)));
+
+	auto cursor = session.ExecuteCursor("EVALUATE 'T'");
+	std::vector<Cell> row;
+	REQUIRE_THROWS_EXACTLY(AuthorizationError, cursor->Next(row));
+}
+
+TEST_CASE("a cursor refuses a statement that is not read-only, before any request") {
+	// The guard is on the STATEMENT, so it does not care how the answer is read.
+	Session session(Target(), Credential());
+	REQUIRE_THROWS_EXACTLY(AuthenticationError, session.ExecuteCursor("UPDATE CUBE [S] SET (m) = 0"));
+}
+
+TEST_CASE("a response that does not decrypt to XML is refused, streaming too") {
+	// The likeliest failure of a cipher layer produces plausible emptiness, and
+	// zero rows is a legitimate answer here — so the shape is checked.
+	FakeSealProvider server_side(16, 512);
+	auto chan = AuthenticatedChannel(server_side, "not xml at all", 0, 0);
+
+	Session session(Target(), Credential());
+	session.Open(chan, std::unique_ptr<GssContext>(new FakeGssContext(1, 16, 512)));
+
+	auto cursor = session.ExecuteCursor("EVALUATE 'T'");
+	std::vector<Cell> row;
+	REQUIRE_THROWS_EXACTLY(ProtocolError, cursor->Next(row));
 }

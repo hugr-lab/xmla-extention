@@ -34,13 +34,14 @@ namespace {
 //! guessing wrong in that direction is a clear "rows cannot be read as a table"
 //! message, while guessing tabular wrongly produces a DAX error from the server.
 bool LooksTabular(const xmla::Rowset &catalogs, const std::string &name) {
-	for (const auto &row : catalogs.rows) {
-		const auto catalog_name = row.find("CATALOG_NAME");
-		if (catalog_name == row.end() || catalog_name->second != name) {
+	for (size_t i = 0; i < catalogs.size(); i++) {
+		const auto row = catalogs.Row(i);
+		const std::string *catalog_name = row.Find("CATALOG_NAME");
+		if (!catalog_name || *catalog_name != name) {
 			continue;
 		}
-		const auto type = row.find("TYPE");
-		return type != row.end() && type->second == "3";
+		const std::string *type = row.Find("TYPE");
+		return type && *type == "3";
 	}
 	return false;
 }
@@ -76,12 +77,12 @@ void XmlaCatalog::LoadSchemas(ClientContext &context) {
 		RethrowXmlaError(error);
 	}
 
-	for (const auto &row : catalogs.rows) {
-		const auto found = row.find("CATALOG_NAME");
-		if (found == row.end() || found->second.empty()) {
+	for (size_t i = 0; i < catalogs.size(); i++) {
+		const std::string *found = catalogs.Row(i).Find("CATALOG_NAME");
+		if (!found || found->empty()) {
 			continue;
 		}
-		const std::string &model = found->second;
+		const std::string &model = *found;
 		// If ATTACH named a catalog, present only that one: an instance can hold
 		// several models and a session usually wants one.
 		if (!params_.catalog.empty() && !StringUtil::CIEquals(params_.catalog, model)) {

@@ -62,6 +62,9 @@ real illustration is a welcome first contribution. Nothing depends on the file.
 |---|---|
 | NTLM, end to end | **works**, verified against SQL Server 2022 on tabular and multidimensional instances |
 | `ATTACH`, `SHOW ALL TABLES`, `DESCRIBE`, `SELECT` | **works** on a tabular model |
+| Projection pushdown | **works** — a narrow `SELECT` sends a DAX `SELECTCOLUMNS` list, not the whole table |
+| `LIMIT` | **works** by stopping the read, not by a DAX clause; DuckDB passes no limit to a scan |
+| Filter pushdown | not done — DAX refuses a text literal against a numeric column, and no non-admin rowset says which columns those are (research D14) |
 | `SELECT` on a multidimensional model | not supported — row scans need DAX `EVALUATE`; use `xmla_execute` with MDX |
 | Kerberos | **unverified against a live server** — see below |
 | Linux | supported |
@@ -71,6 +74,11 @@ real illustration is a welcome first contribution. Nothing depends on the file.
 Discovery, catalog listing and metadata retrieval complete over NTLM. `DBSCHEMA_COLUMNS`
 returns 1366 rows on the test model, which is past the sealed-frame, DIME-chunking and
 TCP-fragmentation thresholds all at once — the case that breaks naive implementations.
+
+A scan streams: the protocol layer hands back a cursor, so rows are decoded as records arrive
+and a query that stops asking stops the transfer. Measured on a 60398-row fact table with
+three columns — `SELECT *` over the whole table 37.07 s, one column over the whole table
+2.22 s, `SELECT * ... LIMIT 5` 0.27 s.
 
 **Kerberos is expected to work.** The mechanism-level questions are settled against a real MIT
 KDC in CI: `gss_wrap_iov` produces the frame's layout, pads for none of the four AES session-key

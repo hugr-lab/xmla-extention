@@ -64,6 +64,12 @@ public:
 	const Bytes &sent() const {
 		return sent_;
 	}
+	//! Bytes queued but never read. A test asserts on this to show that a scan
+	//! that stopped early really did leave the rest of the response on the wire,
+	//! rather than reading it and discarding it.
+	size_t unread() const {
+		return response_.size() - pos_;
+	}
 	bool closed() const {
 		return closed_;
 	}
@@ -103,12 +109,43 @@ public:
 	//! rather than truncated.
 	Bytes ReceiveMessage();
 
+	//! Read the NEXT RECORD of the message being received, blocking only until
+	//! that record has arrived.
+	//!
+	//! `more` comes back false on the record that carries ME - that record's data
+	//! is still in `payload`, so the loop shape is do/while and not while. Said
+	//! with two out-parameters rather than a bool return because "false" would
+	//! have to mean "here is the last payload" and that reads as "no payload".
+	//!
+	//! This is what makes a streaming read possible: ReceiveMessage cannot
+	//! return until the peer sets ME, so a caller that wants the first rows of a
+	//! large rowset would otherwise still wait for the last of them.
+	//!
+	//! The negotiation check runs on the FIRST record of each message, exactly
+	//! as the whole-message path does it.
+	void ReceiveRecord(Bytes &payload, bool &more);
+
+	//! Drop the current message's remaining records without decoding them.
+	//!
+	//! Not "read them and throw them away": abandoning a response means the rest
+	//! of it is never wanted, and reading it would defeat the point. The
+	//! connection is unusable afterwards and the caller must close it — which is
+	//! why this says `Abandon` and not `Skip`.
+	void AbandonMessage();
+
 	void Close();
 
 private:
 	std::shared_ptr<Channel> channel_;
 	Bytes buffer_;
 	size_t max_buffer_;
+	//! True between the first record of a message and the one that sets ME.
+	bool in_message_ = false;
+	//! Set when a message was abandoned part-way; every later read refuses.
+	bool desynchronised_ = false;
+
+	//! Read until `buffer_` holds at least one more byte, or throw.
+	void Fill();
 };
 
 }  // namespace xmla

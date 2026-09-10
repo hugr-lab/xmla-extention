@@ -90,23 +90,32 @@ void XmlaSchemaEntry::LoadTables(ClientContext &context) {
 	// Group the columns by table in one pass. DBSCHEMA_COLUMNS is the large
 	// rowset — 1366 rows on a modest model — so walking it once per table would
 	// be quadratic in the number of tables.
+	// Both column indices are resolved ONCE, outside the loop. That is the shape
+	// the tagged-cell rowset is for: the map-per-row it replaced re-hashed
+	// "TABLE_NAME" and "COLUMN_NAME" on all 1366 rows.
+	const size_t col_table = columns.ColumnIndex("TABLE_NAME");
+	const size_t col_column = columns.ColumnIndex("COLUMN_NAME");
 	case_insensitive_map_t<vector<std::string>> by_table;
-	for (const auto &row : columns.rows) {
-		const auto table = row.find("TABLE_NAME");
-		const auto column = row.find("COLUMN_NAME");
-		if (table == row.end() || column == row.end()) {
-			continue;
+	if (col_table != xmla::Rowset::NO_COLUMN && col_column != xmla::Rowset::NO_COLUMN) {
+		for (size_t i = 0; i < columns.size(); i++) {
+			const auto row = columns.Row(i);
+			const std::string *table = row.FindIndex(col_table);
+			const std::string *column = row.FindIndex(col_column);
+			if (!table || !column) {
+				continue;
+			}
+			by_table[*table].push_back(*column);
 		}
-		by_table[table->second].push_back(column->second);
 	}
 
-	for (const auto &row : tables.rows) {
-		const auto found = row.find("TABLE_NAME");
-		if (found == row.end() || found->second.empty()) {
+	for (size_t i = 0; i < tables.size(); i++) {
+		const auto row = tables.Row(i);
+		const std::string *found = row.Find("TABLE_NAME");
+		if (!found || found->empty()) {
 			continue;
 		}
-		const auto type = row.find("TABLE_TYPE");
-		const std::string table_type = type == row.end() ? std::string() : type->second;
+		const std::string *type = row.Find("TABLE_TYPE");
+		const std::string table_type = type ? *type : std::string();
 
 		// Only TABLE. What the other two are, measured against a live SQL Server
 		// 2022 tabular model (research D13):
@@ -127,7 +136,7 @@ void XmlaSchemaEntry::LoadTables(ClientContext &context) {
 		// uses — and therefore the name to present — is the unprefixed one:
 		// `EVALUATE 'DimProduct'` works, `EVALUATE '$DimProduct'` is not what a
 		// user would write.
-		const std::string &internal_name = found->second;
+		const std::string &internal_name = *found;
 		const std::string table_name =
 			(!internal_name.empty() && internal_name[0] == '$') ? internal_name.substr(1) : internal_name;
 
@@ -154,7 +163,8 @@ void XmlaSchemaEntry::LoadTables(ClientContext &context) {
 			// placeholder keeps it describable rather than failing the schema.
 			info.columns.AddColumn(ColumnDefinition("unknown", LogicalType::VARCHAR));
 		}
-		tables_[table_name] = make_uniq<XmlaTableEntry>(catalog, *this, info, params_, model, tabular_);
+		tables_[table_name] =
+			make_uniq<XmlaTableEntry>(catalog, *this, info, params_, model, tabular_, /*columns_known=*/added > 0);
 	}
 	loaded_ = true;
 }

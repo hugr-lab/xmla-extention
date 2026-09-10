@@ -10,7 +10,61 @@ namespace duckdb {
 
 namespace {
 
-//! Bind data holds only PARAMETERS. No rows.
+//===--------------------------------------------------------------------===//
+// DAX rendering
+//
+// Every identifier that reaches a DAX query is CHECKED rather than escaped.
+// Escaping is the usual answer and it is the weaker one here: these names come
+// from the server's own DBSCHEMA_COLUMNS, so a name carrying `]` or a quote is
+// either a server this client should not trust or a case nobody has tested, and
+// in both situations the right move is to stop pushing down and send the query
+// that was already known to work. Refusing costs a slower scan; a mis-escaped
+// bracket costs a DAX expression the caller never wrote.
+//===--------------------------------------------------------------------===//
+
+//! Whether a name may appear inside a DAX identifier this code composes.
+bool DaxSafeName(const std::string &name) {
+	if (name.empty()) {
+		return false;
+	}
+	for (const char c : name) {
+		const unsigned char byte = static_cast<unsigned char>(c);
+		if (byte < 0x20 || byte == 0x7F) {
+			return false;  // control characters, including the newlines a comment could hide behind
+		}
+		if (c == '[' || c == ']' || c == '\'' || c == '"') {
+			return false;
+		}
+	}
+	return true;
+}
+
+//! `'Table'` — a DAX table reference. The caller has already checked the name.
+std::string DaxTable(const std::string &table) {
+	return "'" + table + "'";
+}
+
+//! `'Table'[Column]` — a DAX column reference.
+std::string DaxColumn(const std::string &table, const std::string &column) {
+	return DaxTable(table) + "[" + column + "]";
+}
+
+//! A DAX string literal. `"` is the only character that needs doubling, and it
+//! is doubled rather than refused because this is a VALUE, not an identifier: a
+//! caller's own search term legitimately contains quotes.
+std::string DaxString(const std::string &value) {
+	std::string out = "\"";
+	for (const char c : value) {
+		if (c == '"') {
+			out.push_back('"');
+		}
+		out.push_back(c);
+	}
+	out.push_back('"');
+	return out;
+}
+
+//! Bind data holds only PARAMETERS and the pushed-down DAX. No rows.
 //!
 //! The query used to be issued in GetScanFunction — that is, during BINDING —
 //! with the whole result retained in the bind data. Three things followed, none
@@ -21,108 +75,270 @@ namespace {
 //!   * a plan bound once and executed repeatedly (PREPARE/EXECUTE) served the
 //!     snapshot taken at bind time, for the life of the statement.
 //!   * the rows were fetched before the executor could have applied anything.
-//!
-//! Fetching in the global init fixes the first two outright. The third is limit
-//! and filter pushdown, which is T-042 and needs the protocol layer to hand back
-//! a cursor rather than a whole Rowset; until then a scan does transfer the
-//! table, which is why this is a scan and not a pushdown.
 struct XmlaScanBindData : public TableFunctionData {
 	XmlaConnectionParams params;
 	std::string ssas_catalog;
 	std::string table_name;
-	//! What the catalog advertised, in order. The plan is already bound to these.
+	//! Every column the catalog advertised, in catalog order. `column_ids`
+	//! indexes into this.
 	vector<std::string> columns;
+	bool columns_known = false;
 };
 
 struct XmlaScanState : public GlobalTableFunctionState {
-	xmla::Rowset rowset;
-	//! The key to look each advertised column up by in the rowset the server
-	//! returned. NOT the column name: `EVALUATE 'DimProduct'` names its columns
-	//! `DimProduct[ProductKey]`, so a bare "ProductKey" lookup misses every row
-	//! and the scan returns all-NULL — which is what it did.
-	vector<std::string> lookup_keys;
-	idx_t offset = 0;
+	// DECLARATION ORDER MATTERS. Members are destroyed in reverse, and the
+	// cursor borrows the session — so the session is declared first so that it
+	// outlives the cursor that abandons it.
+	std::unique_ptr<xmla::Session> session;
+	std::unique_ptr<xmla::RowCursor> cursor;
+
+	//! Output column for each column the cursor has discovered, or -1 for one
+	//! this scan did not ask for. Grown as the cursor's column list grows.
+	vector<int64_t> cell_to_output;
+	//! Every name a requested column might come back under -> its output index.
+	std::map<std::string, idx_t> name_to_output;
+	//! Reused across rows so the per-row cells are not reallocated.
+	std::vector<xmla::Cell> row;
+	bool exhausted = false;
 };
+
+//===--------------------------------------------------------------------===//
+// Why there is no filter pushdown here
+//
+// It was written, and the live instance refused it. `WHERE ProductKey = '477'`
+// rendered as `FILTER('FactInternetSales', 'FactInternetSales'[ProductKey] =
+// "477")` and came back:
+//
+//   DAX comparison operations do not support comparing values of type Integer
+//   with values of type Text. Consider using the VALUE or FORMAT function to
+//   convert one of the values.
+//
+// Every column this extension presents is VARCHAR — the real type mapping is
+// T-041 — so a rendered constant is always a DAX text literal, and DAX refuses
+// the comparison outright against a numeric column rather than coercing. It is a
+// hard error at query time, so the failure is loud rather than silent, which
+// makes it worse in practice: a WHERE clause that works today would stop working
+// the moment it named a numeric column.
+//
+// Knowing the column's type would settle it, and there is no non-admin way to
+// learn it (both measured against SQL Server 2022 Analysis Services, 2026-09):
+//
+//   * DBSCHEMA_COLUMNS reports DATA_TYPE = 130 (DBTYPE_WSTR) for EVERY column of
+//     a tabular model, including the one DAX calls Integer. It cannot tell them
+//     apart. This also constrains T-041.
+//   * TMSCHEMA_COLUMNS, which does carry ExplicitDataType, is refused:
+//     "needs to be an administrator to read the metadata of the database".
+//
+// A type-agnostic rendering does not exist either. CONVERT(c, STRING) and
+// CONTAINSSTRING both push the comparison through DAX's own number-to-text
+// formatting, which need not match the rendering XMLA puts in the rowset — and a
+// mismatch DROPS rows DuckDB would have kept, which is the one failure mode that
+// is silent. `IFERROR` does not help: the message above is reported with a query
+// position, so it is raised when the expression is analysed, not per row.
+//
+// So the WHERE clause stays where DuckDB applies it, and the transfer reduction
+// comes from the projection instead. What would unblock this is T-041 learning
+// the real types from DISCOVER_CSDL_METADATA (which a reader can call) rather
+// than from either schema rowset.
+//===--------------------------------------------------------------------===//
+
+//! The DAX to send, and the output columns it will produce.
+//!
+//! `EVALUATE 'T'` returns every column of the table. That is what a scan sent
+//! whatever the query asked for, so a narrow SELECT over a wide table paid for
+//! all of it.
+//!
+//! Measured against a live SQL Server 2022 tabular model, 60398-row fact table,
+//! 2026-09:
+//!
+//!     all 3 columns, whole table   EVALUATE 'T'      37.07 s
+//!     1 of 3 columns, whole table  SELECTCOLUMNS      2.22 s
+//!     all 3 columns, LIMIT 5       EVALUATE 'T'       0.27 s   (early abandon)
+//!
+//! SELECTCOLUMNS is the one construct here with a version floor: it needs a
+//! tabular model at compatibility level 1200 or above (SSAS 2016+). UNVERIFIED
+//! against anything older — no such instance is available to this project —
+//! which is why it is used ONLY when it actually reduces the transfer. A
+//! `SELECT *` still travels the plain `EVALUATE 'T'` path, which is the one that
+//! has been exercised against a live instance since the first working scan.
+std::string BuildDax(const XmlaScanBindData &bind_data, const vector<std::string> &wanted) {
+	const std::string source = DaxTable(bind_data.table_name);
+	// Only when it actually narrows. A `SELECT *` therefore still travels the
+	// plain `EVALUATE 'T'` path, which is the one exercised against a live
+	// instance from the start.
+	const bool project = bind_data.columns_known && !wanted.empty() && wanted.size() < bind_data.columns.size();
+	if (!project) {
+		return "EVALUATE " + source;
+	}
+	std::string projection = "SELECTCOLUMNS(" + source;
+	for (const auto &column : wanted) {
+		projection += ", " + DaxString(column) + ", " + DaxColumn(bind_data.table_name, column);
+	}
+	projection += ")";
+	return "EVALUATE " + projection;
+}
 
 unique_ptr<GlobalTableFunctionState> ScanInit(ClientContext &context, TableFunctionInitInput &input) {
 	auto &bind_data = input.bind_data->Cast<XmlaScanBindData>();
 	auto state = make_uniq<XmlaScanState>();
 
-	try {
-		auto session = OpenSession(context, bind_data.params);
-		// A quoted single-table EVALUATE. The table name is a DAX identifier, so
-		// it is quoted rather than escaped; a single quote inside it is doubled,
-		// which is DAX's own escape.
-		std::string quoted;
-		for (char c : bind_data.table_name) {
-			if (c == '\'') {
-				quoted.push_back('\'');
-			}
-			quoted.push_back(c);
+	// The projection, in the order the executor expects the output columns.
+	// A row id or a virtual column has no counterpart on the server; it is
+	// dropped here and left NULL in the output.
+	vector<std::string> wanted;
+	bool all_safe = DaxSafeName(bind_data.table_name);
+	for (idx_t out = 0; out < input.column_ids.size(); out++) {
+		const auto column_id = input.column_ids[out];
+		if (column_id >= bind_data.columns.size()) {
+			continue;
 		}
-		state->rowset = session->Execute("EVALUATE '" + quoted + "'", bind_data.ssas_catalog);
-		session->Close();
-	} catch (const xmla::XmlaError &error) {
-		RethrowXmlaError(error);
+		const std::string &name = bind_data.columns[column_id];
+		all_safe = all_safe && DaxSafeName(name);
+		wanted.push_back(name);
+		// Three name forms, because which one comes back depends on the query
+		// DAX ran. `EVALUATE 'DimProduct'` qualifies its columns as
+		// `DimProduct[ProductKey]`; an aliased SELECTCOLUMNS projection returns
+		// the alias, which SSAS encodes as `[ProductKey]` and the rowset scanner
+		// decodes back to that; and a bare name is what a plain rowset carries.
+		//
+		// Accepting all three is deliberate belt-and-braces. Committing to one
+		// and being wrong does not fail — it silently returns a column of NULL,
+		// which has already happened twice.
+		state->name_to_output.emplace(name, out);
+		state->name_to_output.emplace(bind_data.table_name + "[" + name + "]", out);
+		state->name_to_output.emplace("[" + name + "]", out);
+	}
+	if (!all_safe) {
+		// One unsafe name disables the whole projection rather than part of it:
+		// a partial projection would return fewer columns than the plan expects.
+		wanted.clear();
 	}
 
-	// The probe uses the rowset's COLUMN UNION, never a single row.
-	//
-	// XMLA omits a NULL column from a row entirely — that is precisely why
-	// Rowset carries a separate `columns` union, and why ScanExecute treats an
-	// absent key as NULL. Probing rows[0] reintroduced the all-NULL bug it was
-	// written to fix, narrowed to "row 0 happens to be NULL in this column": the
-	// qualified key is absent from row 0, the code falls back to the bare name,
-	// and the bare name then misses on every row.
-	const auto has_column = [&state](const std::string &key) {
-		for (const auto &column : state->rowset.columns) {
-			if (column == key) {
-				return true;
-			}
-		}
-		return false;
-	};
-	for (const auto &bare : bind_data.columns) {
-		const std::string qualified = bind_data.table_name + "[" + bare + "]";
-		state->lookup_keys.push_back(has_column(qualified) ? qualified : bare);
+	// `count(*)` asks for no real column at all — it takes the EMPTY virtual
+	// column instead. The server still has to send something, so ONE column is
+	// projected and then ignored: nothing maps it to an output position, so
+	// every cell it produces is dropped and only the row count survives. Without
+	// this the fallback is `EVALUATE 'T'`, and counting rows would transfer the
+	// whole table.
+	if (wanted.empty() && bind_data.columns_known && all_safe && !bind_data.columns.empty() &&
+		DaxSafeName(bind_data.columns[0])) {
+		wanted.push_back(bind_data.columns[0]);
+	}
+
+	const std::string dax = BuildDax(bind_data, wanted);
+	try {
+		state->session = OpenSession(context, bind_data.params);
+		state->cursor = state->session->ExecuteCursor(dax, bind_data.ssas_catalog);
+	} catch (const xmla::XmlaError &error) {
+		RethrowXmlaError(error);
 	}
 	return std::move(state);
 }
 
 void ScanExecute(ClientContext &, TableFunctionInput &data, DataChunk &output) {
 	auto &state = data.global_state->Cast<XmlaScanState>();
+	const idx_t columns = output.ColumnCount();
 
-	const idx_t remaining = state.rowset.rows.size() - state.offset;
-	const idx_t count = MinValue<idx_t>(STANDARD_VECTOR_SIZE, remaining);
-	if (count == 0) {
-		output.SetCardinality(0);
+	if (state.exhausted) {
+		output.SetChildCardinality(0);
 		return;
 	}
-	for (idx_t row = 0; row < count; row++) {
-		const auto &values = state.rowset.rows[state.offset + row];
-		for (idx_t col = 0; col < state.lookup_keys.size(); col++) {
-			const auto found = values.find(state.lookup_keys[col]);
-			if (found == values.end()) {
-				// XMLA omits a null column rather than sending it empty.
-				output.SetValue(col, row, Value());
-			} else {
-				output.SetValue(col, row, Value(found->second));
-			}
+
+	// Every value this scan produces is a string, so a column that is not
+	// VARCHAR is one this scan does not fill: the EMPTY placeholder `count(*)`
+	// asks for, or any virtual column a later DuckDB adds. Writing a string_t
+	// into it is not a wrong answer, it is a type-confused write into someone
+	// else's memory — DuckDB's own check caught it, and the check is not
+	// guaranteed to be there in a release build.
+	vector<string_t *> vectors(columns, nullptr);
+	vector<ValidityMask *> validities(columns, nullptr);
+	for (idx_t col = 0; col < columns; col++) {
+		validities[col] = &FlatVector::ValidityMutable(output.data[col]);
+		if (output.data[col].GetType().id() == LogicalTypeId::VARCHAR) {
+			vectors[col] = FlatVector::GetDataMutable<string_t>(output.data[col]);
 		}
 	}
-	state.offset += count;
-	output.SetCardinality(count);
+
+	idx_t count = 0;
+	try {
+		while (count < STANDARD_VECTOR_SIZE) {
+			if (!state.cursor->Next(state.row)) {
+				state.exhausted = true;
+				break;
+			}
+			// The cursor's column list GROWS as rows arrive: a column that was
+			// null in every row so far has not been seen yet. So the mapping is
+			// extended here rather than resolved once — and never derived from
+			// the first row, which is the shape of the all-NULL bug.
+			const auto &discovered = state.cursor->columns();
+			while (state.cell_to_output.size() < discovered.size()) {
+				const auto &name = discovered[state.cell_to_output.size()];
+				const auto found = state.name_to_output.find(name);
+				state.cell_to_output.push_back(
+					found == state.name_to_output.end() ? -1 : static_cast<int64_t>(found->second));
+			}
+
+			// Start every value NULL. XMLA OMITS a null column from a row rather
+			// than sending it empty, so absence IS null — distinct from the empty
+			// string a self-closing element means.
+			for (idx_t col = 0; col < columns; col++) {
+				validities[col]->SetInvalid(count);
+			}
+			for (const auto &cell : state.row) {
+				if (cell.column >= state.cell_to_output.size()) {
+					continue;
+				}
+				const int64_t out = state.cell_to_output[cell.column];
+				if (out < 0 || static_cast<idx_t>(out) >= columns) {
+					continue;
+				}
+				const idx_t col = static_cast<idx_t>(out);
+				if (!vectors[col]) {
+					continue;
+				}
+				validities[col]->SetValid(count);
+				vectors[col][count] = StringVector::AddString(output.data[col], cell.value.data(), cell.value.size());
+			}
+			count++;
+		}
+	} catch (const xmla::XmlaError &error) {
+		RethrowXmlaError(error);
+	}
+
+	if (state.exhausted) {
+		// Drained, so the connection is at a record boundary and can be closed
+		// properly. A cursor destroyed BEFORE this abandons it instead, which is
+		// what makes an interrupted scan cheap.
+		state.cursor.reset();
+		if (state.session) {
+			state.session->Close();
+		}
+	}
+	output.SetChildCardinality(count);
 }
 
 }  // namespace
 
 XmlaTableEntry::XmlaTableEntry(Catalog &catalog, SchemaCatalogEntry &schema, CreateTableInfo &info,
-							   XmlaConnectionParams params, std::string ssas_catalog, bool tabular)
+							   XmlaConnectionParams params, std::string ssas_catalog, bool tabular, bool columns_known)
 	: TableCatalogEntry(catalog, schema, info),
 	  columns_(info.columns.Copy()),
 	  params_(std::move(params)),
 	  ssas_catalog_(std::move(ssas_catalog)),
-	  tabular_(tabular) {}
+	  tabular_(tabular),
+	  columns_known_(columns_known) {}
+
+virtual_column_map_t XmlaTableEntry::GetVirtualColumns() const {
+	virtual_column_map_t virtual_columns;
+	virtual_columns.insert(make_pair(COLUMN_IDENTIFIER_EMPTY, TableColumn("", LogicalType::BOOLEAN)));
+	return virtual_columns;
+}
+
+vector<column_t> XmlaTableEntry::GetRowIdColumns() const {
+	// None. The base class returns COLUMN_IDENTIFIER_ROW_ID, which this table
+	// has no way to produce.
+	return vector<column_t>();
+}
 
 unique_ptr<BaseStatistics> XmlaTableEntry::GetStatistics(ClientContext &, column_t) {
 	// None. DBSCHEMA_TABLES does not carry a row count, and inventing one would
@@ -153,19 +369,25 @@ TableFunction XmlaTableEntry::GetScanFunction(ClientContext &, unique_ptr<Functi
 			name);
 	}
 
-	// PARAMETERS ONLY. Nothing here contacts the server: the fetch happens in
+	// PARAMETERS ONLY. Nothing here contacts the server: the request goes out in
 	// ScanInit, so EXPLAIN costs nothing and a re-executed prepared statement
 	// re-reads rather than replaying a bind-time snapshot.
 	auto result = make_uniq<XmlaScanBindData>();
 	result->params = params_;
 	result->ssas_catalog = ssas_catalog_;
 	result->table_name = std::string(name);
+	result->columns_known = columns_known_;
 	for (auto &column : GetColumns().Logical()) {
 		result->columns.push_back(column.Name().GetIdentifierName());
 	}
 
 	TableFunction scan("xmla_table_scan", {}, ScanExecute, nullptr, ScanInit);
-	scan.projection_pushdown = false;
+	// The projection reaches the server as a SELECTCOLUMNS list, so a narrow
+	// SELECT over a wide table transfers narrow.
+	scan.projection_pushdown = true;
+	// No filter pushdown, in either form. See the block comment above BuildDax
+	// for the measurement that decided it.
+	scan.filter_pushdown = false;
 	bind_data = std::move(result);
 	return scan;
 }

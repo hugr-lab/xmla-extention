@@ -11,11 +11,17 @@ namespace {
 
 //! One request's worth of state: the rows, already fetched.
 //!
-//! The whole rowset is materialised at bind time rather than streamed. That is
-//! deliberate for now and is not free: DBSCHEMA_COLUMNS on a modest model is
-//! 1366 rows, which is nothing, but a large Execute could be. Streaming needs
-//! the protocol layer to hand back a cursor rather than a Rowset, which is a
-//! change below this file and belongs with the pushdown work, not here.
+//! These two functions materialise the whole rowset ON PURPOSE, where the table
+//! scan (catalog/xmla_table_entry.cpp) streams through a RowCursor. The reason
+//! is the return shape: both bind their column list from the rowset's column
+//! UNION, and the union is not known until the last row has been seen — XMLA
+//! omits a null column from a row entirely, so a column that is null everywhere
+//! but the final row appears only there. A streaming bind would have to guess a
+//! schema, and guessing it from the first row is precisely the bug that made a
+//! whole scan return NULL, twice.
+//!
+//! The scan does not have that problem because it knows its columns from the
+//! catalog before it asks for anything.
 struct XmlaBindData : public TableFunctionData {
 	xmla::Rowset rowset;
 };
@@ -142,35 +148,58 @@ unique_ptr<GlobalTableFunctionState> InitGlobal(ClientContext &, TableFunctionIn
 void Scan(ClientContext &, TableFunctionInput &data, DataChunk &output) {
 	auto &bind_data = data.bind_data->Cast<XmlaBindData>();
 	auto &state = data.global_state->Cast<XmlaGlobalState>();
+	const auto &rowset = bind_data.rowset;
 
-	const idx_t remaining = bind_data.rowset.rows.size() - state.offset;
+	const idx_t remaining = rowset.size() - state.offset;
 	const idx_t count = MinValue<idx_t>(STANDARD_VECTOR_SIZE, remaining);
 	if (count == 0) {
-		output.SetCardinality(0);
+		output.SetChildCardinality(0);
 		return;
 	}
 
-	const bool no_columns = bind_data.rowset.columns.empty();
-	for (idx_t row = 0; row < count; row++) {
-		const auto &values = bind_data.rowset.rows[state.offset + row];
-		if (no_columns) {
-			output.SetValue(0, row, Value());
-			continue;
+	// An empty rowset still describes one column, so it can still be selected
+	// from; every value in it is NULL.
+	if (rowset.columns.empty()) {
+		auto &validity = FlatVector::ValidityMutable(output.data[0]);
+		for (idx_t row = 0; row < count; row++) {
+			validity.SetInvalid(row);
 		}
-		for (idx_t col = 0; col < bind_data.rowset.columns.size(); col++) {
-			const auto found = values.find(bind_data.rowset.columns[col]);
-			if (found == values.end()) {
-				// XMLA OMITS a null column from a row rather than sending it
-				// empty, so an absent key is SQL NULL — distinct from the empty
-				// string a self-closing element means.
-				output.SetValue(col, row, Value());
-			} else {
-				output.SetValue(col, row, Value(found->second));
+		state.offset += count;
+		output.SetChildCardinality(count);
+		return;
+	}
+
+	// A cell carries its own column INDEX, and DescribeRowset advertised the
+	// columns in exactly rowset.columns order — so a cell's column is already
+	// the output column and there is no name lookup at all. The map-per-row this
+	// replaced hashed a column name once per value.
+	const idx_t columns = MinValue<idx_t>(output.ColumnCount(), rowset.columns.size());
+	vector<string_t *> vectors(columns, nullptr);
+	vector<ValidityMask *> validities(columns, nullptr);
+	for (idx_t col = 0; col < columns; col++) {
+		vectors[col] = FlatVector::GetDataMutable<string_t>(output.data[col]);
+		validities[col] = &FlatVector::ValidityMutable(output.data[col]);
+	}
+
+	for (idx_t row = 0; row < count; row++) {
+		// Start NULL and fill only what the row carries. XMLA OMITS a null column
+		// from a row rather than sending it empty, so absence IS null — distinct
+		// from the empty string a self-closing element means.
+		for (idx_t col = 0; col < columns; col++) {
+			validities[col]->SetInvalid(row);
+		}
+		const auto cells = rowset.Row(state.offset + row);
+		for (const auto *cell = cells.begin(); cell != cells.end(); ++cell) {
+			if (cell->column >= columns) {
+				continue;
 			}
+			const idx_t col = cell->column;
+			validities[col]->SetValid(row);
+			vectors[col][row] = StringVector::AddString(output.data[col], cell->value.data(), cell->value.size());
 		}
 	}
 	state.offset += count;
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 }  // namespace

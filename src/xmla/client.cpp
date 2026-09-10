@@ -237,4 +237,113 @@ Rowset Session::Execute(const std::string &statement, const std::string &catalog
 	return RoundtripRowset(envelopes::Execute(statement, catalog, session_id_));
 }
 
+void Session::SendRequest(const std::string &payload) {
+	const Bytes body(payload.begin(), payload.end());
+	stream_->SendMessage(sealing::SealMessage(*seal_, body), dime::OptionsNegotiated());
+}
+
+std::unique_ptr<RowCursor> Session::ExecuteCursor(const std::string &statement, const std::string &catalog) {
+	RequireAuthenticated();
+	SendRequest(envelopes::Execute(statement, catalog, session_id_));
+	// Not make_unique: the constructor is private and Session is its friend.
+	return std::unique_ptr<RowCursor>(new RowCursor(*this));
+}
+
+RowCursor::RowCursor(Session &session) : session_(session) {
+	unsealer_.reset(new sealing::Unsealer(*session.seal_));
+}
+
+RowCursor::~RowCursor() {
+	if (complete_) {
+		return;
+	}
+	// Abandoned early - which is the whole point of the class. The remaining
+	// records are NOT read: reading them would transfer exactly the bytes this
+	// exists to avoid. That leaves the socket mid-message, so the session is
+	// marked failed and the connection is not reused.
+	session_.stream_->AbandonMessage();
+	session_.state_ = State::FAILED;
+}
+
+const std::vector<std::string> &RowCursor::columns() const {
+	return parser_.columns();
+}
+
+void RowCursor::CheckHead() {
+	if (head_.empty()) {
+		return;
+	}
+	// An empty rowset is a MEANINGFUL answer - "no rows visible to this account"
+	// is distinct from "refused" - so a response that is not XML at all must not
+	// arrive looking like one. The likeliest failure of a cipher layer (wrong
+	// context, desynchronised sequence, a mechanism whose framing differs)
+	// produces exactly that indistinguishable emptiness.
+	//
+	// One '<' is enough to settle it, and anything shorter than that is either
+	// still arriving or not a document.
+	if (!head_checked_) {
+		if (!LooksLikeXmla(head_)) {
+			throw ProtocolError(
+				"the unsealed response is not an XMLA envelope; the security "
+				"context or the frame layout is wrong");
+		}
+		head_checked_ = true;
+	}
+	// Both of these run on EVERY pump, not once, because the prefix grows: the
+	// SOAP header carrying SessionId and the Fault that replaces the body need
+	// not arrive in the same record. Both are cheap - CaptureSessionId returns
+	// immediately once it has one, FindFault rejects on a substring - and the
+	// prefix they scan is bounded.
+	session_.CaptureSessionId(head_);
+	// A SOAP Fault REPLACES the body, so it is in the prefix or it is not there.
+	// A fault emitted after rows have already streamed is therefore not seen
+	// here; the whole-message path (Discover, Execute) still inspects an entire
+	// document, and that is the path the metadata requests use.
+	session_.RaiseForFault(head_, /*during_authentication=*/false);
+}
+
+void RowCursor::Feed(const Bytes &plain) {
+	if (plain.empty()) {
+		return;
+	}
+	const char *bytes = reinterpret_cast<const char *>(plain.data());
+	parser_.Append(bytes, plain.size());
+	if (head_.size() < HEAD_LIMIT) {
+		// May overshoot by one frame, which is the point: the limit bounds the
+		// prefix, it does not have to split a frame to hit it exactly.
+		head_.append(bytes, plain.size());
+	}
+}
+
+void RowCursor::Pump() {
+	Bytes record;
+	bool more = true;
+	session_.stream_->ReceiveRecord(record, more);
+	Feed(unsealer_->Append(record));
+	if (!more) {
+		unsealer_->Finish();
+		Feed(unsealer_->Flush());
+		parser_.Finish();
+		complete_ = true;
+	}
+	CheckHead();
+}
+
+bool RowCursor::Next(std::vector<Cell> &out) {
+	if (drained_) {
+		return false;
+	}
+	for (;;) {
+		if (parser_.Next(out)) {
+			return true;
+		}
+		if (complete_) {
+			// The parser has seen the whole document and has no further row.
+			drained_ = true;
+			return false;
+		}
+		Pump();
+	}
+}
+
 }  // namespace xmla

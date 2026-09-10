@@ -120,8 +120,19 @@ visibly wrong catalog before it was measured.
 
 - [ ] **T-040** `xmla_execute` table function.
 - [ ] **T-041** Type mapping from the rowset's declared column types to DuckDB types, with
-      anything unmapped arriving as `VARCHAR` rather than being guessed at.
-- [ ] **T-042** Scan pushdown for the catalog path where the rowset supports a restriction.
+      anything unmapped arriving as `VARCHAR` rather than being guessed at. NOT from
+      `DBSCHEMA_COLUMNS`: it reports `DBTYPE_WSTR` for every column of a tabular model, and
+      `TMSCHEMA_COLUMNS` needs administrator rights. `DISCOVER_CSDL_METADATA` is the
+      candidate. (research D14)
+- [x] **T-042** Scan pushdown, and a row shape that suits a fact table. Delivered: a
+      `RowCursor` from the protocol layer in place of a whole `Rowset`, so a scan stops
+      reading when the executor stops asking (`LIMIT 5` over 60398 rows: 37.07 s → 0.27 s);
+      projection pushdown as a DAX `SELECTCOLUMNS` list (1 of 3 columns: 37.07 s → 2.22 s);
+      and `Rowset` re-laid-out as tagged cells rather than a `std::map` per row. Filter
+      pushdown is NOT done, and research D14 records the measurement that decided it — DAX
+      refuses comparing a text literal against a numeric column, and no non-admin rowset
+      reveals which columns those are. Limit pushdown is not expressible: DuckDB v2.0 passes
+      no limit to a table function at all. (research D14)
 
 ## Phase 5: User Story 3 — ambient identity (P3)
 

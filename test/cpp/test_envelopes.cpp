@@ -68,7 +68,7 @@ TEST_CASE("an escaped envelope survives a round-trip through the parser") {
 	const std::string value = "a<b>&\"'z";
 	const std::string doc = "<row><V>" + XmlEscape(value) + "</V></row>";
 	const Rowset rs = ParseRowset(doc);
-	REQUIRE_EQ(rs.rows[0].at("V"), value);
+	REQUIRE_EQ(rs.Row(0).At("V"), value);
 }
 
 TEST_CASE("there is no builder for a mutating command") {

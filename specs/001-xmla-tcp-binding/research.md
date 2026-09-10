@@ -371,3 +371,62 @@ later with more effort: reading rows needs `EVALUATE`, which is DAX, and a multi
 model is queried with MDX over cubes, dimensions and measure groups. The catalog reports its
 metadata and refuses the row scan with a message naming MDX and `xmla_execute`, rather than
 sending a DAX statement the server will reject for reasons the user cannot act on.
+
+## D14 — Pushdown: the projection travels, the filter cannot
+
+**Status**: measured against a live SQL Server 2022 tabular model, 2026-09-10, against a
+60398-row fact table with three columns. The design that went in first was wrong and the
+instance said so; this records what it said.
+
+**Projection pushdown works and matters more than expected.** `EVALUATE 'T'` returns every
+column of the table, so a narrow SELECT over a wide one paid for all of it. Rendering the
+requested columns as a DAX `SELECTCOLUMNS` projection changes the transfer, not just the
+parsing:
+
+| query | DAX | wall clock |
+|---|---|---|
+| all 3 columns, whole table | `EVALUATE 'T'` | 37.07 s |
+| 1 of 3 columns, whole table | `EVALUATE SELECTCOLUMNS('T', "c", 'T'[c])` | 2.22 s |
+| all 3 columns, `LIMIT 5` | `EVALUATE 'T'`, abandoned early | 0.27 s |
+
+`SELECTCOLUMNS` needs compatibility level 1200 or above (SSAS 2016+). That floor is
+**UNVERIFIED** — no older instance is available to this project — so the projection is sent
+only when it actually narrows the transfer, and a `SELECT *` still travels the plain
+`EVALUATE 'T'` path that has been exercised since the first working scan.
+
+**Limit pushdown does not exist to be done.** DuckDB v2.0 passes no limit to a table
+function: `TableFunctionInitInput` carries the projection, the filters and the sample options,
+and there is no field for a limit. What a scan *can* do is stop reading, which is why the
+protocol layer hands back a `RowCursor` rather than a `Rowset` — destroying it before it is
+drained abandons the response instead of draining it, and the 0.27 s above is that saving.
+
+**Filter pushdown is refused by DAX, and there is no non-admin way to fix it.** The obvious
+rendering of `WHERE ProductKey = '477'` is
+`FILTER('FactInternetSales', 'FactInternetSales'[ProductKey] = "477")`, and the server
+answers:
+
+> DAX comparison operations do not support comparing values of type Integer with values of
+> type Text. Consider using the VALUE or FORMAT function to convert one of the values.
+
+Every column this extension presents is `VARCHAR` (T-041 is the real type mapping), so a
+rendered constant is always a DAX **text** literal and DAX refuses the comparison against a
+numeric column rather than coercing it. The error is raised with a query position, so it is
+an analysis-time error and `IFERROR` cannot absorb it.
+
+Knowing the column's real type would settle it, and neither schema rowset provides it to an
+ordinary reader:
+
+- `DBSCHEMA_COLUMNS` reports `DATA_TYPE = 130` (`DBTYPE_WSTR`) for **every** column of a
+  tabular model, including the one DAX calls Integer. It cannot tell them apart. **This
+  constrains T-041 as much as it constrains pushdown.**
+- `TMSCHEMA_COLUMNS`, which does carry `ExplicitDataType`, is refused: *"needs to be an
+  administrator to read the metadata of the database"*. A read-only account cannot call it,
+  and asking for administrator rights to read a column type contradicts Principle II.
+
+A type-agnostic rendering is not available either. `CONVERT(c, STRING)` and `CONTAINSSTRING`
+both push the comparison through DAX's own number-to-text formatting, which need not match the
+rendering XMLA puts in the rowset — and a mismatch DROPS rows DuckDB would have kept, which is
+the one failure mode that is silent. A loud DAX error is bad; a quietly short answer is worse.
+
+So the WHERE clause stays where DuckDB applies it. What would unblock this is T-041 learning
+the real types from `DISCOVER_CSDL_METADATA`, which a reader can call.

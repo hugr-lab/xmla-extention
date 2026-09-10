@@ -50,39 +50,83 @@ Bytes SealMessage(SealProvider &provider, const Bytes &payload) {
 	return out;
 }
 
-Bytes UnsealMessage(SealProvider &provider, const Bytes &blob) {
+Bytes Unsealer::Append(const uint8_t *data, size_t size) {
+	buffer_.insert(buffer_.end(), data, data + size);
+
 	Bytes plain;
 	size_t offset = 0;
-	while (offset < blob.size()) {
-		// The 1-3 byte partial header is checked FIRST and explicitly. Folding it
-		// into the loop condition drops it in silence and returns short plaintext
-		// with no error.
-		if (blob.size() - offset < HEADER_LEN) {
-			throw IncompleteMessage("sealed message ends inside a frame header");
+	while (buffer_.size() - offset >= HEADER_LEN) {
+		const size_t data_size = static_cast<size_t>(buffer_[offset]) | (static_cast<size_t>(buffer_[offset + 1]) << 8);
+		const size_t token_size =
+			static_cast<size_t>(buffer_[offset + 2]) | (static_cast<size_t>(buffer_[offset + 3]) << 8);
+		const size_t body = offset + HEADER_LEN;
+		const size_t available = buffer_.size() - body;
+		if (data_size > available || token_size > available - data_size) {
+			break;	// the frame has not fully arrived
 		}
-		const size_t data_size = static_cast<size_t>(blob[offset]) | (static_cast<size_t>(blob[offset + 1]) << 8);
-		const size_t token_size = static_cast<size_t>(blob[offset + 2]) | (static_cast<size_t>(blob[offset + 3]) << 8);
-		offset += HEADER_LEN;
+		const Bytes ciphertext(buffer_.begin() + static_cast<long>(body),
+							   buffer_.begin() + static_cast<long>(body + data_size));
+		const Bytes token(buffer_.begin() + static_cast<long>(body + data_size),
+						  buffer_.begin() + static_cast<long>(body + data_size + token_size));
+		offset = body + data_size + token_size;
 
-		const size_t remaining = blob.size() - offset;
-		if (data_size > remaining || token_size > remaining - data_size) {
-			throw IncompleteMessage("sealed frame runs past the end of the message");
-		}
-		const Bytes ciphertext(blob.begin() + static_cast<long>(offset),
-							   blob.begin() + static_cast<long>(offset + data_size));
-		const Bytes token(blob.begin() + static_cast<long>(offset + data_size),
-						  blob.begin() + static_cast<long>(offset + data_size + token_size));
-		offset += data_size + token_size;
-
-		const Bytes piece = provider.Unseal(ciphertext, token);
+		const Bytes piece = provider_.Unseal(ciphertext, token);
 		plain.insert(plain.end(), piece.begin(), piece.end());
 	}
+	buffer_.erase(buffer_.begin(), buffer_.begin() + static_cast<long>(offset));
 
-	// The BOM was sealed as its own frame on the way out and comes back the same
-	// way; strip it so callers see the document, not the preamble.
-	if (plain.size() >= BOM_LEN && plain[0] == BOM[0] && plain[1] == BOM[1] && plain[2] == BOM[2]) {
-		plain.erase(plain.begin(), plain.begin() + BOM_LEN);
+	if (bom_settled_) {
+		return plain;
 	}
+	// The BOM was sealed as its own frame on the way out and comes back the same
+	// way; strip it so callers see the document, not the preamble. Held back
+	// rather than tested per frame, because "the first three bytes" is the
+	// contract and a frame boundary is not guaranteed to fall there.
+	head_.insert(head_.end(), plain.begin(), plain.end());
+	if (head_.size() < BOM_LEN) {
+		return Bytes();
+	}
+	bom_settled_ = true;
+	if (head_[0] == BOM[0] && head_[1] == BOM[1] && head_[2] == BOM[2]) {
+		head_.erase(head_.begin(), head_.begin() + BOM_LEN);
+	}
+	Bytes out;
+	out.swap(head_);
+	return out;
+}
+
+void Unsealer::Finish() {
+	if (buffer_.empty()) {
+		return;
+	}
+	// The 1-3 byte partial header is its OWN message, and always was. Folding it
+	// into the loop condition drops it in silence and returns short plaintext
+	// with no error.
+	if (buffer_.size() < HEADER_LEN) {
+		throw IncompleteMessage("sealed message ends inside a frame header");
+	}
+	throw IncompleteMessage("sealed frame runs past the end of the message");
+}
+
+Bytes Unsealer::Flush() {
+	if (bom_settled_) {
+		return Bytes();
+	}
+	bom_settled_ = true;
+	if (head_.size() >= BOM_LEN && head_[0] == BOM[0] && head_[1] == BOM[1] && head_[2] == BOM[2]) {
+		head_.erase(head_.begin(), head_.begin() + BOM_LEN);
+	}
+	Bytes out;
+	out.swap(head_);
+	return out;
+}
+
+Bytes UnsealMessage(SealProvider &provider, const Bytes &blob) {
+	Unsealer unsealer(provider);
+	Bytes plain = unsealer.Append(blob);
+	unsealer.Finish();
+	const Bytes tail = unsealer.Flush();
+	plain.insert(plain.end(), tail.begin(), tail.end());
 	return plain;
 }
 

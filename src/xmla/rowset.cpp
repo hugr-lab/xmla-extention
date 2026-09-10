@@ -1,7 +1,10 @@
 #include "xmla/rowset.hpp"
 
+#include "xmla/errors.hpp"
+
 #include <cctype>
 #include <cstddef>
+#include <stdexcept>
 
 namespace xmla {
 
@@ -168,21 +171,37 @@ struct Tag {
 	size_t attrs_end = 0;
 };
 
-//! Find the next tag at or after `from`. Returns false at end of input.
+//! Find the next tag at or after `from`. Returns false when the buffer holds no
+//! complete tag from there on.
 //!
 //! Comments, CDATA, processing instructions and doctypes are SKIPPED rather than
 //! parsed, because each of them can contain '<' and '>' and a scanner that does
 //! not know that will read their contents as markup.
-bool NextTag(const std::string &s, size_t from, Tag &tag) {
+//!
+//! `resume`, when given, receives how far the skipping got. The streaming parser
+//! persists it so a construct already skipped is not skipped again on the next
+//! call: without it, a document arriving in n pieces rescans every earlier
+//! comment n times, which is quadratic in a peer-supplied length.
+bool NextTag(const std::string &s, size_t from, Tag &tag, size_t *resume = nullptr) {
+	const auto give_up = [&](size_t reached) {
+		if (resume) {
+			*resume = reached;
+		}
+		return false;
+	};
 	while (true) {
 		const size_t lt = s.find('<', from);
 		if (lt == std::string::npos) {
-			return false;
+			// Nothing markup-ish is pending, so a resuming caller may skip the
+			// whole buffer.
+			return give_up(s.size());
 		}
 		if (s.compare(lt, 4, "<!--") == 0) {
 			const size_t close = s.find("-->", lt + 4);
 			if (close == std::string::npos) {
-				return false;
+				// Resume AT the '<': the construct is retried whole once its
+				// terminator arrives.
+				return give_up(lt);
 			}
 			from = close + 3;
 			continue;
@@ -190,7 +209,9 @@ bool NextTag(const std::string &s, size_t from, Tag &tag) {
 		if (s.compare(lt, 9, "<![CDATA[") == 0) {
 			const size_t close = s.find("]]>", lt + 9);
 			if (close == std::string::npos) {
-				return false;
+				// Resume AT the '<': the construct is retried whole once its
+				// terminator arrives.
+				return give_up(lt);
 			}
 			from = close + 3;
 			continue;
@@ -198,7 +219,9 @@ bool NextTag(const std::string &s, size_t from, Tag &tag) {
 		if (s.compare(lt, 2, "<?") == 0) {
 			const size_t close = s.find("?>", lt + 2);
 			if (close == std::string::npos) {
-				return false;
+				// Resume AT the '<': the construct is retried whole once its
+				// terminator arrives.
+				return give_up(lt);
 			}
 			from = close + 2;
 			continue;
@@ -206,7 +229,9 @@ bool NextTag(const std::string &s, size_t from, Tag &tag) {
 		if (s.compare(lt, 2, "<!") == 0) {
 			const size_t close = s.find('>', lt + 2);
 			if (close == std::string::npos) {
-				return false;
+				// Resume AT the '<': the construct is retried whole once its
+				// terminator arrives.
+				return give_up(lt);
 			}
 			from = close + 1;
 			continue;
@@ -214,7 +239,7 @@ bool NextTag(const std::string &s, size_t from, Tag &tag) {
 
 		const size_t gt = s.find('>', lt + 1);
 		if (gt == std::string::npos) {
-			return false;
+			return give_up(lt);
 		}
 		tag.begin = lt;
 		tag.end = gt + 1;
@@ -248,18 +273,130 @@ std::string TextUntilMarkup(const std::string &s, size_t from) {
 
 }  // namespace
 
-Rowset ParseRowset(const std::string &text) {
-	Rowset out;
-	size_t pos = 0;
-	Tag tag;
-	int row_depth = -1;
-	int depth = 0;
-	std::map<std::string, std::string> row;
-	std::string pending_field;
-	size_t pending_from = 0;
+size_t Rowset::ColumnIndex(const std::string &name) const {
+	for (size_t i = 0; i < columns.size(); i++) {
+		if (columns[i] == name) {
+			return i;
+		}
+	}
+	return NO_COLUMN;
+}
 
-	while (NextTag(text, pos, tag)) {
-		pos = tag.end;
+const std::string *Rowset::RowView::FindIndex(size_t column) const {
+	for (const Cell *cell = begin_; cell != end_; ++cell) {
+		if (cell->column == column) {
+			return &cell->value;
+		}
+	}
+	return nullptr;
+}
+
+const std::string *Rowset::RowView::Find(const std::string &name) const {
+	if (!columns_) {
+		return nullptr;
+	}
+	for (size_t i = 0; i < columns_->size(); i++) {
+		if ((*columns_)[i] == name) {
+			return FindIndex(i);
+		}
+	}
+	return nullptr;
+}
+
+const std::string &Rowset::RowView::At(const std::string &name) const {
+	const std::string *found = Find(name);
+	if (!found) {
+		// Same contract as std::map::at, which this replaced. A caller reaching
+		// for a column that is absent from THIS row has confused "null" with
+		// "empty", and the two mean different things in XMLA.
+		throw std::out_of_range("xmla: no column '" + name + "' in this row");
+	}
+	return *found;
+}
+
+Rowset::RowView Rowset::Row(size_t i) const {
+	if (i + 1 >= row_starts.size()) {
+		// These indices come from a peer's byte stream by way of a caller's
+		// arithmetic. An empty view is a wrong answer; reading off the end is a
+		// crash.
+		return RowView(nullptr, nullptr, &columns);
+	}
+	const Cell *base = cells.data();
+	return RowView(base + row_starts[i], base + row_starts[i + 1], &columns);
+}
+
+void Rowset::AppendRow(std::vector<Cell> &&row) {
+	if (cells.size() + row.size() > UINT32_MAX) {
+		// row_starts is uint32 to halve its footprint. MessageStream caps an
+		// unparsed message at 64 MiB, and a cell costs more than one byte, so
+		// this is unreachable through the transport - which is exactly why it is
+		// checked rather than assumed.
+		throw ProtocolError("rowset exceeds the addressable number of cells");
+	}
+	for (auto &cell : row) {
+		cells.push_back(std::move(cell));
+	}
+	row_starts.push_back(static_cast<uint32_t>(cells.size()));
+	row.clear();
+}
+
+void RowStreamParser::Append(const char *data, size_t size) {
+	buffer_.append(data, size);
+}
+
+uint32_t RowStreamParser::ColumnFor(const std::string &name) {
+	for (size_t i = 0; i < columns_.size(); i++) {
+		if (columns_[i] == name) {
+			return static_cast<uint32_t>(i);
+		}
+	}
+	if (columns_.size() >= UINT32_MAX) {
+		throw ProtocolError("rowset declares more columns than can be indexed");
+	}
+	columns_.push_back(name);
+	return static_cast<uint32_t>(columns_.size() - 1);
+}
+
+void RowStreamParser::SetCell(uint32_t column, std::string value) {
+	// LAST WINS on a repeated element within one row, which is what the
+	// std::map assignment this replaced did. Silently keeping the first would be
+	// a different answer for the same bytes.
+	for (auto &cell : row_) {
+		if (cell.column == column) {
+			cell.value = std::move(value);
+			return;
+		}
+	}
+	Cell cell;
+	cell.column = column;
+	cell.value = std::move(value);
+	row_.push_back(std::move(cell));
+}
+
+void RowStreamParser::Compact() {
+	// Only BETWEEN rows. Inside one, pending_from_ is an absolute offset into
+	// the buffer and dropping a prefix would silently shift the text a value is
+	// read from.
+	if (pos_ == 0 || row_depth_ >= 0 || !pending_field_.empty()) {
+		return;
+	}
+	buffer_.erase(0, pos_);
+	pos_ = 0;
+}
+
+bool RowStreamParser::Next(std::vector<Cell> &out) {
+	Compact();
+	Tag tag;
+	for (;;) {
+		size_t resume = pos_;
+		if (!NextTag(buffer_, pos_, tag, &resume)) {
+			// No COMPLETE tag from here. Whether that is "wait" or "that was
+			// everything" is the caller's to decide - it knows whether the peer
+			// is done - and either way there is no row to hand back now.
+			pos_ = resume;
+			return false;
+		}
+		pos_ = tag.end;
 		const std::string local = LocalName(tag.qname);
 
 		if (tag.is_close) {
@@ -268,33 +405,21 @@ Rowset ParseRowset(const std::string &text) {
 			// failed, and the function returned an EMPTY rowset with no error —
 			// indistinguishable from "no catalogs visible to this account",
 			// which this layer documents as a meaningful answer.
-			if (depth > 0) {
-				depth--;
+			if (depth_ > 0) {
+				depth_--;
 			}
 			// depth has already been decremented, so a direct child of <row>
 			// closes at row_depth + 1: <row> itself sits AT row_depth.
-			if (!pending_field.empty() && row_depth >= 0 && depth == row_depth + 1) {
+			if (!pending_field_.empty() && row_depth_ >= 0 && depth_ == row_depth_ + 1) {
 				// Closing a direct child of <row>: its text is the value.
-				const std::string value = TextUntilMarkup(text, pending_from);
-				if (row.find(pending_field) == row.end()) {
-					bool known = false;
-					for (const auto &c : out.columns) {
-						if (c == pending_field) {
-							known = true;
-							break;
-						}
-					}
-					if (!known) {
-						out.columns.push_back(pending_field);
-					}
-				}
-				row[pending_field] = value;
-				pending_field.clear();
+				SetCell(ColumnFor(pending_field_), TextUntilMarkup(buffer_, pending_from_));
+				pending_field_.clear();
 			}
-			if (row_depth >= 0 && depth == row_depth && local == "row") {
-				out.rows.push_back(row);
-				row.clear();
-				row_depth = -1;
+			if (row_depth_ >= 0 && depth_ == row_depth_ && local == "row") {
+				out.clear();
+				out.swap(row_);
+				row_depth_ = -1;
+				return true;
 			}
 			continue;
 		}
@@ -302,35 +427,42 @@ Rowset ParseRowset(const std::string &text) {
 		if (tag.self_closing) {
 			// A self-closing child of <row> is an empty value, which is distinct
 			// from an absent column.
-			if (row_depth >= 0 && depth == row_depth + 1) {
-				const std::string field = DecodeXmlName(local);
-				bool known = false;
-				for (const auto &c : out.columns) {
-					if (c == field) {
-						known = true;
-						break;
-					}
-				}
-				if (!known) {
-					out.columns.push_back(field);
-				}
-				row[field] = std::string();
+			if (row_depth_ >= 0 && depth_ == row_depth_ + 1) {
+				SetCell(ColumnFor(DecodeXmlName(local)), std::string());
 			}
 			continue;
 		}
 
-		if (local == "row" && row_depth < 0) {
-			row_depth = depth;
-			row.clear();
-			depth++;
+		if (local == "row" && row_depth_ < 0) {
+			row_depth_ = depth_;
+			row_.clear();
+			depth_++;
 			continue;
 		}
-		if (row_depth >= 0 && depth == row_depth + 1) {
-			pending_field = DecodeXmlName(local);
-			pending_from = tag.end;
+		if (row_depth_ >= 0 && depth_ == row_depth_ + 1) {
+			pending_field_ = DecodeXmlName(local);
+			pending_from_ = tag.end;
 		}
-		depth++;
+		depth_++;
 	}
+}
+
+Rowset ParseRowset(const std::string &text) {
+	// One scanner, two entry points. Everything this function used to do inline
+	// now lives in RowStreamParser, so the streaming path and the whole-document
+	// path cannot disagree about what a row is.
+	RowStreamParser parser;
+	parser.Append(text);
+	parser.Finish();
+
+	Rowset out;
+	std::vector<Cell> row;
+	while (parser.Next(row)) {
+		out.AppendRow(std::move(row));
+	}
+	// AFTER the rows: a column that is null in every row until the last is not
+	// in the union until that row has been seen.
+	out.columns = parser.columns();
 	return out;
 }
 
