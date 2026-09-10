@@ -104,9 +104,24 @@ int main(int argc, char **argv) {
 		return 2;
 	}
 
+	// What this LOAD does and does not prove, since it is easy to over-read.
+	//
+	// extension_config.cmake registers xmla WITHOUT DONT_LINK, so it is linked
+	// into libduckdb and registered at open time: `duckdb_extensions()` reports
+	// its install_path as "(BUILT-IN)", and the ATTACH checks below therefore
+	// exercise THAT copy, not the .duckdb_extension file. What the LOAD does
+	// prove is that the built artifact exists and is accepted — verified by
+	// passing a path that does not exist, which fails here with
+	// 'Extension "..." not found' rather than being ignored.
 	const std::string load_error = Run(con, "LOAD '" + extension + "'");
 	if (!load_error.empty()) {
 		std::fprintf(stderr, "could not load the extension: %s\n", load_error.c_str());
+		duckdb_disconnect(&con);
+		duckdb_close(&db);
+		return 2;
+	}
+	if (Scalar(con, "SELECT count(*) FROM duckdb_extensions() WHERE extension_name = 'xmla' AND loaded") != "1") {
+		std::fprintf(stderr, "the xmla extension is not loaded\n");
 		duckdb_disconnect(&con);
 		duckdb_close(&db);
 		return 2;

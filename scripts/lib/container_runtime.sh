@@ -53,6 +53,24 @@ xmla_plugin_is_signed() {
 xmla_select_runtime() {
     local candidate
     XMLA_RUNTIME=""
+
+    # Apple's runtime only exists on macOS, and the whole branch below assumes
+    # it: `codesign` is not on a Linux host, so the signature check returns
+    # false for ANY binary named `container`, the fallback then prints a
+    # macOS-only warning about Homebrew bottles and entitlements, selects that
+    # binary as if it were Apple's, and every later call uses Apple's flag
+    # shapes against a different program. Docker was never reached.
+    if [ "$(uname -s)" != "Darwin" ]; then
+        command -v docker >/dev/null 2>&1 || {
+            printf 'no usable `docker` runtime found.\n' >&2
+            return 1
+        }
+        XMLA_RUNTIME=$(command -v docker)
+        XMLA_RUNTIME_IS_APPLE=0
+        printf 'runtime: %s (%s)\n' "$XMLA_RUNTIME" "$("$XMLA_RUNTIME" --version 2>&1 | head -1)"
+        return 0
+    fi
+
     for candidate in /usr/local/bin/container "$(command -v container 2>/dev/null || true)"; do
         [ -n "$candidate" ] && [ -x "$candidate" ] || continue
         if xmla_plugin_is_signed "$candidate"; then

@@ -41,14 +41,27 @@ std::string StringLiteral(const std::string &value);
 //!
 //! `wanted` is the columns to project, in output order; `total_columns` is how
 //! many the table has. A projection is composed only when it actually NARROWS
-//! the transfer and every name involved is safe — otherwise the result is plain
-//! `EVALUATE '<table>'`, which is the form that has been exercised against a
-//! live instance since the first working scan.
+//! the transfer, every name involved is safe, and `columns_known` says the
+//! column list came from the server rather than being a placeholder —
+//! otherwise the result is plain `EVALUATE '<table>'`, which is the form that
+//! has been exercised against a live instance since the first working scan.
+//!
+//! `columns_known` is a parameter rather than a caller-side condition because
+//! it is a rule about the projection and belongs where the projection is
+//! decided. As a caller-side condition it was safe only by accident: the
+//! unknown case happens to be exactly one synthetic column, which can never
+//! narrow, so a second placeholder would silently have started naming a column
+//! the server does not have.
 //!
 //! SELECTCOLUMNS needs a tabular model at compatibility level 1200 or above
 //! (SSAS 2016+). That floor is UNVERIFIED — no older instance is available to
 //! this project — which is the other reason the narrowing condition is there.
-std::string Evaluate(const std::string &table, const std::vector<std::string> &wanted, size_t total_columns);
+//!
+//! Throws ProtocolError when the TABLE name is unsafe. Not a fallback: the
+//! plain form quotes the name too, so there is nothing safe to compose, and a
+//! named refusal beats a DAX syntax error the operator cannot attribute.
+std::string Evaluate(const std::string &table, const std::vector<std::string> &wanted, size_t total_columns,
+					 bool columns_known);
 
 }  // namespace dax
 }  // namespace xmla

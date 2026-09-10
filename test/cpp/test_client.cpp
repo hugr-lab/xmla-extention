@@ -468,6 +468,43 @@ TEST_CASE("a cursor destroyed after its session was closed does not crash") {
 		REQUIRE(!cursor->complete());
 		// Out of order on purpose: the cursor is still alive.
 		session.Close();
+
+		// And it is still USED, which is the reachable crash the destructor
+		// guard did not cover. Close() resets seal_ as well as stream_, and the
+		// unsealer holds a SealProvider REFERENCE — so this was a null deref if
+		// it had to read, and a use-after-free if it got past that. Which one a
+		// mis-ordered caller hit depended on whether rows happened to be
+		// buffered, so the failure was not even deterministic.
+		std::vector<Cell> more;
+		REQUIRE_THROWS_EXACTLY(ConnectionError, [&]() {
+			while (cursor->Next(more)) {
+			}
+		}());
 	}
 	REQUIRE(session.state() == State::CLOSED);
+}
+
+TEST_CASE("the streaming cap accepts what the whole-message path accepts") {
+	// A record larger than the cap, or a single legitimate row larger than it,
+	// used to be refused by the scan while Session::Execute accepted it — with
+	// a message blaming an unterminated document. The two paths must agree, so
+	// the cap is the transport's own, and it is measured on what the parser
+	// RETAINS rather than on that plus a whole freshly-appended record.
+	std::string wide = "<root><row><A>";
+	wide.append(300000, 'x');
+	wide += "</A></row></root>";
+
+	FakeSealProvider server_side(16, 512);
+	auto chan = AuthenticatedChannel(server_side, wide, 0, 0);
+	Session session(Target(), Credential());
+	session.Open(chan, std::unique_ptr<GssContext>(new FakeGssContext(1, 16, 512)));
+
+	// One record carrying the whole 300 KB document, against a 256 KiB cap: the
+	// row is complete, so retaining it briefly is not a violation.
+	auto cursor = session.ExecuteCursor("EVALUATE 'T'", std::string(), 256 * 1024);
+	std::vector<Cell> row;
+	REQUIRE(cursor->Next(row));
+	REQUIRE_EQ(row.size(), 1u);
+	REQUIRE_EQ(row[0].value.size(), 300000u);
+	REQUIRE(!cursor->Next(row));
 }

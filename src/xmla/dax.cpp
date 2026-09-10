@@ -1,5 +1,7 @@
 #include "xmla/dax.hpp"
 
+#include "xmla/errors.hpp"
+
 namespace xmla {
 namespace dax {
 
@@ -41,16 +43,20 @@ std::string StringLiteral(const std::string &value) {
 	return out;
 }
 
-std::string Evaluate(const std::string &table, const std::vector<std::string> &wanted, size_t total_columns) {
-	const std::string source = Table(table);
+std::string Evaluate(const std::string &table, const std::vector<std::string> &wanted, size_t total_columns,
+					 bool columns_known) {
 	if (!SafeName(table)) {
-		// Nothing can be composed around an unsafe table name — not even the
-		// plain form, which quotes it. The caller gets a statement the server
-		// will reject rather than one that reads someone else's table.
-		return "EVALUATE " + source;
+		// REFUSE. There is nothing safe to compose around an unsafe table name:
+		// the plain form quotes it too, so returning `EVALUATE '<name>'` would
+		// emit the rejected string verbatim into a quoted context and leave the
+		// operator with a DAX syntax error they cannot attribute to anything.
+		throw ProtocolError(
+			"the table name the server reported cannot be used in a query; "
+			"it contains a quote, a bracket or a control character");
 	}
+	const std::string source = Table(table);
 
-	bool narrows = !wanted.empty() && wanted.size() < total_columns;
+	bool narrows = columns_known && !wanted.empty() && wanted.size() < total_columns;
 	for (const auto &column : wanted) {
 		if (!SafeName(column)) {
 			// ONE unsafe name disables the whole projection rather than part of

@@ -32,7 +32,10 @@ OUT="$BUILD_DIR/capi_attach_access_mode"
 "$CXX" -std=c++17 -o "$OUT" test/capi/attach_access_mode.cpp \
     -I duckdb/src/include -L "$LIBDIR" -lduckdb -Wl,-rpath,"$PWD/$LIBDIR"
 
-# The absolute path matters: LOAD resolves a relative one against the database's
-# directory, not the working directory.
+# An absolute path, so the LOAD does not depend on the working directory. The
+# extension is also LINKED into libduckdb (extension_config.cmake registers it
+# without DONT_LINK), so the ATTACH checks exercise that copy; what passing the
+# artifact adds is that the built file exists and loads. See the comment in
+# test/capi/attach_access_mode.cpp.
 "$OUT" "$PWD/$EXTENSION"
 echo "capi: all checks passed"

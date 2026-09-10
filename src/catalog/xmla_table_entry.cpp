@@ -128,7 +128,8 @@ unique_ptr<GlobalTableFunctionState> ScanInit(ClientContext &context, TableFunct
 
 	// Composing the statement — and deciding whether a projection is safe and
 	// worth sending at all — is xmla::dax's business, and it is tested there.
-	const std::string dax = xmla::dax::Evaluate(bind_data.table_name, wanted, bind_data.columns.size());
+	const std::string dax =
+		xmla::dax::Evaluate(bind_data.table_name, wanted, bind_data.columns.size(), bind_data.columns_known);
 	try {
 		state->session = OpenSession(context, bind_data.params);
 		state->cursor = state->session->ExecuteCursor(dax, bind_data.ssas_catalog);

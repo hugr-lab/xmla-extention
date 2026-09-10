@@ -68,16 +68,20 @@ public:
 	//! MessageStream caps the bytes it buffers, but that cap became PER RECORD
 	//! once records were consumed one at a time — so a peer streaming records
 	//! that form no complete row grew the parser without limit. This is the
-	//! missing cap. It is smaller than MessageStream's 64 MiB on purpose: an
-	//! unterminated comment makes every feed re-search the pending region, so
-	//! the work before the cap fires is on the order of the limit squared over
-	//! the read size, and 16 MiB keeps that under a second where 64 MiB does
-	//! not. A legitimate document never approaches it — the parser retains at
-	//! most one row plus a partial tag, because compaction reclaims the rest.
+	//! missing cap.
+	//!
+	//! It is the SAME value as MessageStream's, deliberately. A smaller one
+	//! made the two read paths disagree about the same response: a record
+	//! larger than the limit — the server's choice, bounded only by the
+	//! transport — or a single legitimate row larger than it, since every
+	//! column is VARCHAR and text has no bound, was accepted by
+	//! Session::Execute and refused by the scan, with a message blaming an
+	//! unterminated document. Whatever the whole-message path accepts, this
+	//! one accepts.
 	//!
 	//! Overridable for the same reason MessageStream's is: a test that had to
-	//! push 16 MiB through the fake provider to reach it would not be written.
-	static const size_t DEFAULT_PARSER_LIMIT = 16 * 1024 * 1024;
+	//! push 64 MiB through the fake provider to reach it would not be written.
+	static const size_t DEFAULT_PARSER_LIMIT = MessageStream::DEFAULT_MAX_BUFFER;
 
 	~RowCursor();
 	RowCursor(const RowCursor &) = delete;

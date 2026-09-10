@@ -332,14 +332,6 @@ void RowCursor::Feed(const Bytes &plain) {
 	}
 	const char *bytes = reinterpret_cast<const char *>(plain.data());
 	parser_.Append(bytes, plain.size());
-	// The cap that MessageStream's stopped being once records are consumed one
-	// at a time. Checked AFTER the append and before the next read, so the
-	// overshoot is one record rather than unbounded.
-	if (parser_.buffered() > parser_limit_) {
-		throw ProtocolError("buffered " + std::to_string(parser_.buffered()) +
-							" bytes of response without a complete row (limit " + std::to_string(parser_limit_) +
-							"); the document is unterminated or the stream is desynchronised");
-	}
 	if (head_.size() < HEAD_LIMIT) {
 		// May overshoot by one frame, which is the point: the limit bounds the
 		// prefix, it does not have to split a frame to hit it exactly.
@@ -348,6 +340,25 @@ void RowCursor::Feed(const Bytes &plain) {
 }
 
 void RowCursor::Pump() {
+	// The session must still be open. Close() resets BOTH stream_ and seal_, and
+	// the unsealer holds a SealProvider REFERENCE — so pumping after a close was
+	// a null dereference at best and a use-after-free at worst. The destructor
+	// was guarded for this and the live path was not; which of the two a
+	// mis-ordered caller hit depended on whether rows happened to be buffered.
+	if (!session_.stream_ || !session_.seal_) {
+		throw ConnectionError("the session was closed while the response was still being read");
+	}
+	// The cap that MessageStream's stopped being once records are consumed one
+	// at a time. Checked HERE, before the read, rather than after appending a
+	// record: entering Pump the parser has just compacted (the Next() that sent
+	// us here did it), so this measures exactly what the parser retains. After
+	// the append it measured "retained plus one whole record", which is not the
+	// quantity the limit is chosen for.
+	if (parser_.buffered() > parser_limit_) {
+		throw ProtocolError("buffered " + std::to_string(parser_.buffered()) +
+							" bytes of response without a complete row (limit " + std::to_string(parser_limit_) +
+							"); the document is unterminated or the stream is desynchronised");
+	}
 	Bytes record;
 	bool more = true;
 	session_.stream_->ReceiveRecord(record, more);
