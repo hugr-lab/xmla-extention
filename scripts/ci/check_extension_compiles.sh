@@ -21,8 +21,13 @@ if [ ! -f duckdb/src/include/duckdb.hpp ]; then
     exit 1
 fi
 
-# Discovered, not listed: a new DuckDB-facing file is covered the moment it lands.
-files=$(find src -maxdepth 1 -name '*.cpp' -print)
+# Every source EXCEPT the protocol layer, at any depth.
+#
+# `-maxdepth 1` missed src/catalog/ entirely — five files that only compile
+# inside the DuckDB build and were therefore checked by nothing at all, which is
+# the exact gap this script exists to close. src/xmla/ is excluded because it is
+# built (and tested) standalone by every other job.
+files=$(find src -name '*.cpp' -not -path 'src/xmla/*' -print)
 count=$(printf '%s\n' "$files" | grep -c '[^[:space:]]' || true)
 if [ "$count" -eq 0 ]; then
     echo "extension-compile: found 0 sources -- the check is broken, which is not a pass" >&2

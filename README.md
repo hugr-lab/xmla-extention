@@ -25,11 +25,32 @@ misdescribe an implementation that uses no provider at all.
 INSTALL xmla FROM community;
 LOAD xmla;
 
-ATTACH 'host=ssas-host port=2383' AS aw (TYPE xmla);
+CREATE SECRET ssas (TYPE xmla, MECHANISM 'ntlm', USER 'reader', PASSWORD '...');
+ATTACH 'host=ssas-host port=2383 secret=ssas' AS aw (TYPE xmla);
 
 SHOW ALL TABLES;
-SELECT * FROM aw.model."Internet Sales" LIMIT 10;
+DESCRIBE aw."Adventure Works".DimProduct;
+
+-- and the point of the whole thing: SSAS joined to local data
+SELECT p.EnglishProductName, local.note
+FROM aw."Adventure Works".DimProduct p
+JOIN local_notes local ON p.ProductKey = local.k;
 ```
+
+Without `ATTACH`, for metadata and ad-hoc DAX/MDX:
+
+```sql
+SELECT CUBE_NAME, CUBE_TYPE
+FROM xmla_discover('host=ssas-host port=2383 secret=ssas', 'MDSCHEMA_CUBES');
+
+SELECT * FROM xmla_execute('host=ssas-host port=2383 secret=ssas',
+                           'EVALUATE TOPN(10, Sales)');
+```
+
+`MDSCHEMA_CUBES` is "show all cubes"; `MDSCHEMA_MEASURES`, `MDSCHEMA_DIMENSIONS`
+and `DBSCHEMA_COLUMNS` are the describe surface. `DESCRIBE` and `SHOW ALL TABLES`
+work on an attached catalog because its schemas are the instance's models and its
+tables are their tables — the extension implements neither command.
 
 The mascot is a **lesser scaup**: a diving duck, because drilling into a cube is diving, not
 dabbling. The current mark is a hand-authored placeholder and looks it — replacing it with a
@@ -40,6 +61,8 @@ real illustration is a welcome first contribution. Nothing depends on the file.
 | | |
 |---|---|
 | NTLM, end to end | **works**, verified against SQL Server 2022 on tabular and multidimensional instances |
+| `ATTACH`, `SHOW ALL TABLES`, `DESCRIBE`, `SELECT` | **works** on a tabular model |
+| `SELECT` on a multidimensional model | not supported — row scans need DAX `EVALUATE`; use `xmla_execute` with MDX |
 | Kerberos | **unverified against a live server** — see below |
 | Linux | supported |
 | macOS | needs MIT krb5 (`brew install krb5`); Apple's GSS.framework cannot seal |

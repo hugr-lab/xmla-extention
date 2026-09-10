@@ -184,6 +184,11 @@ if(COMMAND build_loadable_extension)
         src/xmla_connection.cpp
         src/xmla_secret.cpp
         src/xmla_functions.cpp
+        src/xmla_storage.cpp
+        src/catalog/xmla_catalog.cpp
+        src/catalog/xmla_schema_entry.cpp
+        src/catalog/xmla_table_entry.cpp
+        src/catalog/xmla_transaction.cpp
         ${XMLA_PROTOCOL_SOURCES})
     if(XMLA_GSS_FOUND)
         list(APPEND XMLA_EXTENSION_SOURCES src/xmla/gss_context.cpp)

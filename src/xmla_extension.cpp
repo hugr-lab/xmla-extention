@@ -4,6 +4,7 @@
 #include "duckdb/main/extension/extension_loader.hpp"
 #include "xmla_functions.hpp"
 #include "xmla_secret.hpp"
+#include "xmla_storage.hpp"
 
 namespace duckdb {
 
@@ -15,6 +16,10 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// Windows-only msolap extension, which offers one function and no way to
 	// ask for metadata at all.
 	RegisterXmlaFunctions(loader);
+	// ATTACH ... (TYPE xmla): the instance's catalogs become schemas and their
+	// tables become tables, which is what makes SHOW ALL TABLES and DESCRIBE
+	// work without this extension implementing either.
+	RegisterXmlaStorage(loader);
 }
 
 void XmlaExtension::Load(ExtensionLoader &loader) {

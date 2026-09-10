@@ -126,3 +126,72 @@ statement error
 SELECT * FROM xmla_discover('host=example.invalid port=2383 secret=nope', 'DBSCHEMA_CATALOGS');
 ----
 not found
+
+# --- ATTACH (T-036) and read-only refusal (T-037) -----------------------------
+#
+# Still server-free. ATTACH deliberately contacts nothing: schemas load on first
+# use, so attaching an unreachable instance SUCCEEDS and the first query reports
+# the failure. That is what makes these cases possible without a server, and it
+# is a deliberate difference from the neighbouring mssql extension's eager
+# validation — an instance powered off between sessions would otherwise make
+# every ATTACH in a script fail, even for a catalog the script never touches.
+statement ok
+ATTACH 'host=example.invalid port=2383' AS ro (TYPE xmla);
+
+query I
+SELECT count(*) FROM duckdb_databases() WHERE database_name = 'ro';
+----
+1
+
+# The path reported for the attached database is NOT the host: this string
+# surfaces in duckdb_databases() and in error messages (constitution I).
+query I
+SELECT path NOT LIKE '%example.invalid%' FROM duckdb_databases() WHERE database_name = 'ro';
+----
+true
+
+# An unknown ATTACH option is refused rather than ignored.
+statement error
+ATTACH 'host=example.invalid port=2383' AS ro2 (TYPE xmla, NONSENSE 'x');
+----
+unknown ATTACH option
+
+# A missing port is reported at ATTACH, not deferred to the first query.
+statement error
+ATTACH 'host=example.invalid' AS ro3 (TYPE xmla);
+----
+port is required
+
+# A named secret that does not exist is reported at ATTACH too.
+statement error
+ATTACH 'host=example.invalid port=2383 secret=absent' AS ro4 (TYPE xmla);
+----
+not found
+
+# T-037. CATALOG-level DDL is refused by the catalog itself, before any network
+# contact: this runs against an unresolvable host and still produces the
+# read-only message rather than a connection error.
+statement error
+CREATE SCHEMA ro.newschema;
+----
+READ-ONLY
+
+# TABLE-level DDL and DML cannot be asserted server-free, and it is worth being
+# precise about why rather than writing a test that accepts any failure.
+#
+# `CREATE TABLE ro.main.t` must first RESOLVE the schema `main`, and resolving a
+# schema means fetching DBSCHEMA_CATALOGS — so against an unreachable host the
+# connection fails before the refusal is reached. Against a reachable instance
+# the same statement gets the READ-ONLY message; that path is exercised by the
+# live probe, not here.
+#
+# The guarantee does not depend on which error arrives: the extension contains no
+# path that writes, and the catalog's PlanInsert/PlanUpdate/PlanDelete/
+# PlanCreateTableAs/BindCreateIndex overrides all refuse unconditionally.
+statement error
+CREATE TABLE ro.main.t (i INTEGER);
+----
+could not resolve the instance address
+
+statement ok
+DETACH ro;

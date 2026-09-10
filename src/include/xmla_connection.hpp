@@ -47,18 +47,32 @@ struct XmlaConnectionParams {
 	//! something the caller did not ask for.
 	static XmlaConnectionParams FromString(const std::string &connection);
 
-	//! Fill anything still unset from a DuckDB secret. Returns the password,
-	//! which the caller passes directly to the session and does not retain.
-	std::string ApplySecret(ClientContext &context);
+	//! Resolve the secret, apply defaults, and validate — IN THAT ORDER.
+	//!
+	//! One entry point, because the order is not incidental and getting it wrong
+	//! is silent. It has now been got wrong twice, in two places: applying
+	//! defaults before the secret makes the DEFAULT beat the secret, so a secret
+	//! carrying mechanism='ntlm' was ignored and every connection attempted
+	//! Kerberos. Splitting the steps into public methods invited exactly that,
+	//! so they are private now and this is the only way in.
+	//!
+	//! Returns the password, which the caller hands straight to the security
+	//! layer and does not retain. Calling this twice is fine and cheap.
+	std::string Resolve(ClientContext &context);
 
-	//! Apply defaults for anything neither the connection string nor the secret
-	//! set. Called after ApplySecret, which is the whole point.
-	void ApplyDefaults();
-
-	void Validate() const;
+	//! Resolve without keeping the password — for ATTACH, which validates the
+	//! parameters but opens no connection.
+	void ResolveAndDiscardPassword(ClientContext &context) {
+		(void)Resolve(context);
+	}
 
 	xmla::ConnectionTarget Target() const;
 	xmla::Credential Credential() const;
+
+private:
+	std::string ApplySecret(ClientContext &context);
+	void ApplyDefaults();
+	void Validate() const;
 };
 
 //! Open an authenticated session. The password is read here and dropped here.

@@ -189,13 +189,19 @@ xmla::Credential XmlaConnectionParams::Credential() const {
 	return credential;
 }
 
+std::string XmlaConnectionParams::Resolve(ClientContext &context) {
+	// Order matters and is enforced here rather than trusted to callers.
+	const std::string password = ApplySecret(context);
+	ApplyDefaults();
+	Validate();
+	return password;
+}
+
 std::unique_ptr<xmla::Session> OpenSession(ClientContext &context, XmlaConnectionParams params) {
 	// The password lives for the duration of this function and no longer. It is
 	// handed to GssContext::Create, which passes it to the security layer without
 	// retaining it, and is never placed on the Session.
-	const std::string password = params.ApplySecret(context);
-	params.ApplyDefaults();
-	params.Validate();
+	const std::string password = params.Resolve(context);
 	if (getenv("XMLA_DEBUG")) {
 		// SHAPES ONLY, never values (constitution I). This exists because the
 		// bug it found was invisible any other way: "the connection string wins

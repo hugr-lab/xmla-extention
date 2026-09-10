@@ -330,3 +330,44 @@ output, not only fault text — anything a probe prints can be pasted into an is
 **Still UNVERIFIED after this run**: everything Kerberos. The fixture is a standalone workgroup
 machine, so its SSAS speaks NTLM only and no amount of live testing against it can settle D5's
 token-layout question or D8's SPN form.
+
+---
+
+## D13 — What a tabular model's DBSCHEMA rowsets actually contain
+
+**Status**: measured against a live SQL Server 2022 tabular model, 2026-09-10, while building
+the ATTACH catalog. Every one of these was found by looking rather than by reasoning, and each
+one produced a visibly wrong catalog first.
+
+`DBSCHEMA_TABLES` on a tabular model returns three populations, and only one of them is a
+table a user would want:
+
+| TABLE_SCHEMA | TABLE_TYPE | rows | what it is |
+|---|---|---|---|
+| `$SYSTEM` | `SCHEMA` | 123 | the schema **rowsets** — `DBSCHEMA_CATALOGS`, `DMSCHEMA_MINING_COLUMNS`, … |
+| `Model` | `SYSTEM TABLE` | 2 | `DimProduct` — the measure-group view, one column, `__Count of DimProduct` |
+| `Model` | `TABLE` | 2 | `$DimProduct` — the dimension table, holding the real columns |
+
+Listing everything filled `SHOW ALL TABLES` with the server's own introspection surface. The
+catalog therefore takes `TABLE_TYPE = 'TABLE'` only.
+
+**The `$` prefix is internal.** The name DAX uses is the unprefixed one: `EVALUATE
+'DimProduct'` works and `EVALUATE '$DimProduct'` is not what anyone would write. So the
+catalog presents `DimProduct` while reading its columns from `$DimProduct`.
+
+**`EVALUATE` qualifies its result columns.** `EVALUATE 'DimProduct'` returns columns named
+`DimProduct[ProductKey]` and `DimProduct[EnglishProductName]` — not `ProductKey`. A scan that
+looks up the bare name misses every row and returns all-NULL, which is exactly what the first
+working ATTACH did: `DESCRIBE` was right and `SELECT` was a column of nulls. The scan tries
+`<table>[<column>]` first and the bare name second, because DISCOVER and DBSCHEMA rowsets do
+return bare names.
+
+**`EVALUATE` omits the row surrogate.** `$DimProduct` carries a `RowNumber-<GUID>` column that
+`EVALUATE` does not return, so advertising it produces a column that is always NULL. It is
+excluded by prefix.
+
+**Multidimensional models cannot be scanned this way at all**, and this is not a gap to fill
+later with more effort: reading rows needs `EVALUATE`, which is DAX, and a multidimensional
+model is queried with MDX over cubes, dimensions and measure groups. The catalog reports its
+metadata and refuses the row scan with a message naming MDX and `xmla_execute`, rather than
+sending a DAX statement the server will reject for reasons the user cannot act on.
