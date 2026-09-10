@@ -12,6 +12,11 @@ namespace xmla {
 
 namespace {
 
+//! Said in ONE place, because both read paths raise it and they must not drift.
+const char *const kCellsetMessage =
+	"the server returned a multidimensional cellset rather than a rowset; "
+	"this client reads rows and asked for Format=Tabular";
+
 //! Fault text that means "you are known but not permitted", as opposed to "the
 //! request was bad". Keeps AuthorizationError distinct from ServerError.
 const char *const kDeniedMarkers[] = {"does not have access", "permission", "not authorized", "access is denied"};
@@ -34,6 +39,19 @@ std::string ToLower(const std::string &in) {
 //! Deliberately not a parse: a SOAP fault is also a valid envelope and is
 //! handled a step earlier, so this only has to separate "an XML document from
 //! the server" from "plaintext that did not decrypt".
+//! Whether a response is a multidimensional cellset rather than a rowset.
+//!
+//! Detected by the cellset's own ELEMENTS, not by the string "mddataset" —
+//! that is the namespace URI on <root>, so matching it as an element name finds
+//! nothing. The XMLA MDDataSet schema puts OlapInfo, Axes and CellData under
+//! that root; Axes and CellData are the two that cannot plausibly appear in a
+//! rowset. HasElement, not FindElementText: FindElementText wants an element's
+//! TEXT and so skips self-closing tags, and a cellset whose cells are all null
+//! has an empty CellData that a serializer may write as <CellData/>.
+bool LooksLikeCellset(const std::string &text) {
+	return HasElement(text, "CellData") || HasElement(text, "Axes");
+}
+
 bool LooksLikeXmla(const std::string &text) {
 	size_t i = 0;
 	// Skip a BOM the sealing layer did not strip, plus leading whitespace.
@@ -198,16 +216,8 @@ Rowset Session::RoundtripRowset(const std::string &payload) {
 	// there was nothing to distinguish "the cube is empty" from "the client
 	// cannot read this shape". If a server ever ignores the property, this says
 	// so instead.
-	std::string ignored;
-	// Detected by the cellset's own ELEMENTS, not by "mddataset" — that string
-	// is the namespace URI on the <root> element, so matching it as an element
-	// name finds nothing. The XMLA MDDataSet schema puts OlapInfo, Axes and
-	// CellData under that root; Axes and CellData are the two that cannot
-	// plausibly appear in a rowset.
-	if (rows.empty() && (FindElementText(text, "CellData", ignored) || FindElementText(text, "Axes", ignored))) {
-		throw ProtocolError(
-			"the server returned a multidimensional cellset rather than a rowset; "
-			"this client reads rows and asked for Format=Tabular");
+	if (rows.empty() && LooksLikeCellset(text)) {
+		throw ProtocolError(kCellsetMessage);
 	}
 	return rows;
 }
@@ -401,10 +411,24 @@ bool RowCursor::Next(std::vector<Cell> &out) {
 	}
 	for (;;) {
 		if (parser_.Next(out)) {
+			emitted_ = true;
 			return true;
 		}
 		if (complete_) {
-			// The parser has seen the whole document and has no further row.
+			// The parser has seen the whole document and has no further row —
+			// which is where the SAME cellset check the whole-message path makes
+			// belongs. Without it the two paths disagreed about one response:
+			// RoundtripRowset threw and the cursor reported drained with zero
+			// rows. The extension only drives the cursor with DAX today, but
+			// ExecuteCursor is public protocol-layer API and RejectIfMutating
+			// accepts SELECT, so MDX through it is a supported call — and it had
+			// the pre-fix behaviour intact.
+			//
+			// The prefix suffices: a cellset's OlapInfo and Axes are at the
+			// start of the document, well inside HEAD_LIMIT.
+			if (!emitted_ && LooksLikeCellset(head_)) {
+				throw ProtocolError(kCellsetMessage);
+			}
 			drained_ = true;
 			return false;
 		}

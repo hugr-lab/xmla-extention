@@ -128,9 +128,16 @@ unique_ptr<GlobalTableFunctionState> ScanInit(ClientContext &context, TableFunct
 
 	// Composing the statement — and deciding whether a projection is safe and
 	// worth sending at all — is xmla::dax's business, and it is tested there.
-	const std::string dax =
-		xmla::dax::Evaluate(bind_data.table_name, wanted, bind_data.columns.size(), bind_data.columns_known);
+	//
+	// INSIDE the try, because Evaluate refuses an unsafe table name by throwing
+	// and every xmla error that reaches DuckDB from this extension goes through
+	// RethrowXmlaError. Outside it, the refusal escaped as a plain
+	// std::exception and DuckDB reported an untyped "Invalid Error" with no
+	// prefix — a named refusal arriving mislabelled, which is most of what it
+	// was added to fix.
 	try {
+		const std::string dax =
+			xmla::dax::Evaluate(bind_data.table_name, wanted, bind_data.columns.size(), bind_data.columns_known);
 		state->session = OpenSession(context, bind_data.params);
 		state->cursor = state->session->ExecuteCursor(dax, bind_data.ssas_catalog);
 	} catch (const xmla::XmlaError &error) {

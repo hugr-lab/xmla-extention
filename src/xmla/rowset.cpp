@@ -532,6 +532,20 @@ Fault FindFault(const std::string &text) {
 	return fault;
 }
 
+bool HasElement(const std::string &text, const std::string &local_name) {
+	size_t pos = 0;
+	Tag tag;
+	while (NextTag(text, pos, tag)) {
+		pos = tag.end;
+		// No is_close/self_closing filter, deliberately: presence is the
+		// question, and <CellData/> is present.
+		if (LocalName(tag.qname) == local_name) {
+			return true;
+		}
+	}
+	return false;
+}
+
 bool FindElementText(const std::string &text, const std::string &local_name, std::string &out) {
 	size_t pos = 0;
 	Tag tag;

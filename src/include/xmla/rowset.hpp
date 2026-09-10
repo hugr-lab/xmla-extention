@@ -255,6 +255,15 @@ Fault FindFault(const std::string &text);
 //! and for the handshake's security token.
 bool FindElementText(const std::string &text, const std::string &local_name, std::string &out);
 
+//! Whether an element with this local name appears at all.
+//!
+//! Distinct from FindElementText, which wants an element's TEXT and therefore
+//! skips close and SELF-CLOSING tags. For "is this shape present?" the
+//! self-closing form counts: an mddataset whose cells are all null has an empty
+//! <CellData>, which a serializer is free to write as <CellData/>, and a
+//! detector built on FindElementText was blind to exactly that.
+bool HasElement(const std::string &text, const std::string &local_name);
+
 //! Pull an attribute value off the first element with the given local name.
 bool FindAttribute(const std::string &text, const std::string &local_name, const std::string &attribute,
 				   std::string &out);

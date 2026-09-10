@@ -548,3 +548,64 @@ TEST_CASE("a genuinely empty ROWSET is still zero rows, not an error") {
 	REQUIRE(rs.empty());
 	REQUIRE_EQ(rs.size(), 0u);
 }
+
+TEST_CASE("a cellset written with EMPTY elements is still refused") {
+	// FindElementText skips self-closing tags, because it wants an element's
+	// text — so a detector built on it was blind to <CellData/>. That is not a
+	// hypothetical shape: in an mddataset a null cell is OMITTED, so a query
+	// whose cells are all null legitimately has an empty CellData, and a
+	// serializer may write it short. HasElement does not skip it.
+	const char *cellset =
+		"<Envelope><Body><ExecuteResponse><return>"
+		"<root xmlns=\"urn:schemas-microsoft-com:xml-analysis:mddataset\">"
+		"<OlapInfo/><Axes/><CellData/>"
+		"</root></return></ExecuteResponse></Body></Envelope>";
+	FakeSealProvider server_side(16, 512);
+	auto chan = std::make_shared<BytesChannel>();
+	chan->Queue(PlainResponseWire(kAuthResponse, 0));
+	chan->Queue(SealedResponseWire(server_side, cellset, 0));
+
+	Session session(Target(), Credential());
+	session.Open(chan, std::unique_ptr<GssContext>(new FakeGssContext(1, 16, 512)));
+	REQUIRE_THROWS_EXACTLY(ProtocolError, session.Execute("SELECT {[Measures].[X]} ON COLUMNS FROM [C]"));
+}
+
+TEST_CASE("the CURSOR path refuses a cellset too, not just the whole-message one") {
+	// The guard went into RoundtripRowset only, so the two paths disagreed about
+	// one response: Execute threw and ExecuteCursor reported drained with zero
+	// rows. The extension drives the cursor with DAX today, but ExecuteCursor is
+	// public API and RejectIfMutating accepts SELECT, so MDX through it is a
+	// supported call that still had the pre-fix behaviour.
+	const char *cellset =
+		"<Envelope><Body><ExecuteResponse><return>"
+		"<root xmlns=\"urn:schemas-microsoft-com:xml-analysis:mddataset\">"
+		"<OlapInfo/><Axes><Axis name=\"Axis0\"><Tuples/></Axis></Axes>"
+		"<CellData><Cell CellOrdinal=\"0\"><Value>42</Value></Cell></CellData>"
+		"</root></return></ExecuteResponse></Body></Envelope>";
+	FakeSealProvider server_side(16, 512);
+	auto chan = std::make_shared<BytesChannel>();
+	chan->Queue(PlainResponseWire(kAuthResponse, 0));
+	chan->Queue(SealedResponseWire(server_side, cellset, 200));
+
+	Session session(Target(), Credential());
+	session.Open(chan, std::unique_ptr<GssContext>(new FakeGssContext(1, 16, 512)));
+	auto cursor = session.ExecuteCursor("SELECT {[Measures].[X]} ON COLUMNS FROM [C]");
+	std::vector<Cell> row;
+	REQUIRE_THROWS_EXACTLY(ProtocolError, cursor->Next(row));
+}
+
+TEST_CASE("a rowset that HAS rows is never mistaken for a cellset") {
+	// The guard is narrow on purpose: it only fires when no row was produced.
+	// A response carrying rows must reach the caller whatever else is in it.
+	FakeSealProvider server_side(16, 512);
+	auto chan = AuthenticatedChannel(server_side, EvaluateDocument(3), 0, 0);
+	Session session(Target(), Credential());
+	session.Open(chan, std::unique_ptr<GssContext>(new FakeGssContext(1, 16, 512)));
+	auto cursor = session.ExecuteCursor("EVALUATE 'T'");
+	std::vector<Cell> row;
+	int seen = 0;
+	while (cursor->Next(row)) {
+		seen++;
+	}
+	REQUIRE_EQ(seen, 3);
+}

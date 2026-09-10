@@ -494,3 +494,25 @@ TEST_CASE("a row index of SIZE_MAX is an empty view, not an overflowed check") {
 	REQUIRE(rs.Row(static_cast<size_t>(-1)).Find("A") == nullptr);
 	REQUIRE_EQ(rs.Row(static_cast<size_t>(-2)).size(), 0u);
 }
+
+TEST_CASE("HasElement sees a self-closing element; FindElementText does not") {
+	// The distinction is load-bearing, so it is pinned rather than left to a
+	// reader of both functions. FindElementText wants an element's TEXT, so it
+	// skips close and self-closing tags — which made a cellset detector built
+	// on it blind to <CellData/>, and a null-celled mddataset serializes
+	// exactly that.
+	const std::string shortform = "<root><OlapInfo/><Axes/><CellData/></root>";
+	std::string text;
+	REQUIRE(!FindElementText(shortform, "CellData", text));
+	REQUIRE(HasElement(shortform, "CellData"));
+	REQUIRE(HasElement(shortform, "Axes"));
+
+	// The long form is found by both.
+	const std::string longform = "<root><CellData><Cell>1</Cell></CellData></root>";
+	REQUIRE(FindElementText(longform, "CellData", text));
+	REQUIRE(HasElement(longform, "CellData"));
+
+	// And an element that is not there is not found by either.
+	REQUIRE(!HasElement(shortform, "Nope"));
+	REQUIRE(!FindElementText(shortform, "Nope", text));
+}

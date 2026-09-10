@@ -79,6 +79,20 @@ public:
 	//! unterminated document. Whatever the whole-message path accepts, this
 	//! one accepts.
 	//!
+	//! The 16 MiB value it replaced had a real CPU argument behind it, and this
+	//! trades it away knowingly. NextTag resumes AT the '<' of an unterminated
+	//! comment, CDATA, PI or doctype, so each pump re-searches the pending
+	//! region for the terminator: the work to reach the cap is quadratic in the
+	//! limit, and 4x the bound is ~16x the scan work. (The review that raised
+	//! this said 16x the bound and ~256x the work; 16 MiB to 64 MiB is 4x.)
+	//! What bounds it is that the cap fires at all, and the threat model: this
+	//! is POST-AUTHENTICATION, so the peer is the instance the operator chose
+	//! to connect to, and the cost is a few seconds of scanning ending in a
+	//! ProtocolError. Persisting the terminator-search offset would make it
+	//! linear and is the fix if that ever stops being an acceptable trade; it
+	//! was declined because it adds resumable state to a fuzz-target scanner
+	//! for a hostile-only cost.
+	//!
 	//! Overridable for the same reason MessageStream's is: a test that had to
 	//! push 64 MiB through the fake provider to reach it would not be written.
 	static const size_t DEFAULT_PARSER_LIMIT = MessageStream::DEFAULT_MAX_BUFFER;
@@ -128,6 +142,8 @@ private:
 	bool head_checked_ = false;
 	bool complete_ = false;
 	bool drained_ = false;
+	//! Whether any row has been handed out. A cellset produces none.
+	bool emitted_ = false;
 };
 
 //! An authenticated conversation with an instance.

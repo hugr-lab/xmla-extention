@@ -176,6 +176,77 @@ Columns arrive as `VARCHAR`. The rowset that is supposed to report a column's ty
 `WSTR` for all of them, so a real type mapping needs a different source (T-041) — and
 guessing a type from a value would not be honest.
 
+## A tabular session, end to end
+
+A real transcript against a live SQL Server 2022 tabular instance. Only the
+host, account and password are replaced; the catalog on this instance is called
+`AWTabular`.
+
+```sql
+CREATE SECRET ssas (TYPE xmla, HOST '<instance>', PORT 2383,
+                    MECHANISM 'ntlm', USER '<user>', PASSWORD '<password>');
+ATTACH 'secret=ssas' AS aw (TYPE xmla);
+```
+
+**`SHOW ALL TABLES`** — the schemas are the instance's models and the tables are
+their tables, so DuckDB's own command answers it. The extension implements
+neither `SHOW ALL TABLES` nor `DESCRIBE`:
+
+```sql
+SHOW ALL TABLES;
+```
+```
+┌──────────┬───────────┬───────────────────┬──────────────────────────────────────────┬─────────────────────────────┬───────────┐
+│ database │  schema   │       name        │               column_names               │        column_types         │ temporary │
+├──────────┼───────────┼───────────────────┼──────────────────────────────────────────┼─────────────────────────────┼───────────┤
+│ aw       │ AWTabular │ DimProduct        │ [ProductKey, EnglishProductName]         │ [VARCHAR, VARCHAR]          │ false     │
+│ aw       │ AWTabular │ FactInternetSales │ [ProductKey, SalesAmount, OrderQuantity] │ [VARCHAR, VARCHAR, VARCHAR] │ false     │
+└──────────┴───────────┴───────────────────┴──────────────────────────────────────────┴─────────────────────────────┴───────────┘
+```
+
+**`DESCRIBE`**:
+
+```sql
+DESCRIBE aw."AWTabular".DimProduct;
+```
+```
+┌────────────────────┬─────────────┬──────┬──────┬─────────┬───────┐
+│    column_name     │ column_type │ null │ key  │ default │ extra │
+├────────────────────┼─────────────┼──────┼──────┼─────────┼───────┤
+│ ProductKey         │ VARCHAR     │ YES  │ NULL │ NULL    │ NULL  │
+│ EnglishProductName │ VARCHAR     │ YES  │ NULL │ NULL    │ NULL  │
+└────────────────────┴─────────────┴──────┴──────┴─────────┴───────┘
+```
+
+**And the point of the whole thing — SSAS joined to local data.** The SSAS side
+is an ordinary scan, so it joins, filters and aggregates like any other table:
+
+```sql
+CREATE TABLE local_notes(k VARCHAR, note VARCHAR);
+INSERT INTO local_notes VALUES ('310','discontinued'),
+                               ('311','review pricing'),
+                               ('312','low stock');
+
+SELECT p.EnglishProductName, local.note
+FROM aw."AWTabular".DimProduct p
+JOIN local_notes local ON p.ProductKey = local.k
+ORDER BY p.EnglishProductName;
+```
+```
+┌────────────────────┬────────────────┐
+│ EnglishProductName │      note      │
+├────────────────────┼────────────────┤
+│ Road-150 Red, 44   │ review pricing │
+│ Road-150 Red, 48   │ low stock      │
+│ Road-150 Red, 62   │ discontinued   │
+└────────────────────┴────────────────┘
+```
+
+That scan sent plain `EVALUATE 'DimProduct'`, because the join needs both of
+that table's two columns and a projection that does not narrow is not sent. Ask
+for one column of a wider table and a `SELECTCOLUMNS` list travels instead; see
+"How a scan behaves".
+
 ## A cube session, end to end
 
 Everything below is a real transcript against a live SQL Server 2022

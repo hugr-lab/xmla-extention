@@ -251,6 +251,14 @@ if [ "$status" = 0 ] && [ -n "${XMLA_HOST:-}" ]; then
             printf "SELECT * FROM live.%s LIMIT 5;\n" "$XMLA_TABLE"
             printf ".print --- count(*) (the EMPTY virtual column, one projected column) ---\n"
             printf "SELECT 'ASSERT rows=' || count(*) AS check FROM live.%s;\n" "$XMLA_TABLE"
+            printf ".print --- ONE column over the whole table (the SELECTCOLUMNS projection) ---\n"
+            # A multi-column projection is the case where output-position
+            # mapping and column ordering matter, and count(*) does not reach
+            # it: that narrows to one column by a different route. Dropping this
+            # in the restructuring left the header promising a check that no
+            # longer ran.
+            printf "SELECT 'ASSERT narrow=' || count(c0) AS check FROM (SELECT * FROM live.%s) t(c0);\n" \
+                "$XMLA_TABLE"
         } >> "$SQL"
     else
         printf ".print --- note: XMLA_TABLE is unset, so the scan checks were skipped ---\n" >> "$SQL"
@@ -270,9 +278,21 @@ if [ "$status" = 0 ] && [ -n "${XMLA_HOST:-}" ]; then
         *) echo "the table count did not come back" >&2; status=1 ;;
     esac
     if [ -n "${XMLA_TABLE:-}" ]; then
+        # A FLOOR, like the table count above. `*"ASSERT rows="*` matched
+        # `ASSERT rows=0` just as happily, so a regression that made every scan
+        # return nothing — a broken cursor, a desynchronised unseal, a
+        # projection naming a column the server does not have — left DESCRIBE,
+        # SELECT and count(*) all exiting 0 and this section green. Zero is the
+        # symptom this check exists to catch, not an answer.
         case "$live_out" in
+            *"ASSERT rows=0"*) echo "the scan returned no rows" >&2; status=1 ;;
             *"ASSERT rows="*) ;;
             *) echo "the row count did not come back" >&2; status=1 ;;
+        esac
+        case "$live_out" in
+            *"ASSERT narrow=0"*) echo "the narrow projection returned no rows" >&2; status=1 ;;
+            *"ASSERT narrow="*) ;;
+            *) echo "the narrow projection did not come back" >&2; status=1 ;;
         esac
     fi
 
