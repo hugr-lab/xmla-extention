@@ -27,15 +27,16 @@ extension:
 
 repo:
   github: "hugr-lab/xmla-extention"
-  # PLACEHOLDER — MUST be replaced with a real commit SHA before submitting to
-  # the community-extensions registry. All-zeroes is not a resolvable object, so
-  # a build from this file fails at checkout; that is deliberate, because the
-  # alternative (a branch name) is silently accepted here and rejected by the
-  # registry's own validation, and a stale SHA would publish the wrong tree.
+  # An immutable SHA, never a branch name: the registry checks out this exact
+  # object, so a published build is reproducible. A branch name is silently
+  # accepted here and rejected by the registry's own validation.
   #
-  # An immutable SHA is required because the registry checks out this exact
-  # object, so a published build is reproducible.
-  ref: "0000000000000000000000000000000000000000"  # REPLACE BEFORE SUBMITTING
+  # This is the merge of PR #10 on main. It necessarily TRAILS this file by at
+  # least one commit — the ref names the tree to build, and the file naming it
+  # is submitted to duckdb/community-extensions rather than read from here — so
+  # re-pin it to the current tip of main immediately before each submission, and
+  # confirm the object is on main: `git branch -r --contains <sha>`.
+  ref: "31d10d8d65f97d8eb96573ae01cf8ff7b46704aa"
 
 docs:
   hello_world: |
