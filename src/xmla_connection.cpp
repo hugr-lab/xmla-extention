@@ -61,7 +61,13 @@ bool ParseBool(const std::string &key, const std::string &value) {
 	if (lowered == "false" || lowered == "0" || lowered == "no" || lowered == "off") {
 		return false;
 	}
-	throw BinderException("xmla: %s must be true or false, not '%s'", key, value);
+	// The KEY only, not the value. Every other parser in this file does the
+	// same: ParsePort names the range, ParseTimeout names the bound, and the
+	// unknown-option error echoes the key. A connection string's contents reach
+	// the query log and every error display, and there is a test that exists
+	// specifically to assert a rejected connection string is not echoed back.
+	// The key alone says which option to look at.
+	throw BinderException("xmla: %s must be true or false", key);
 }
 
 }  // namespace

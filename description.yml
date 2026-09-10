@@ -10,10 +10,20 @@ extension:
     - "VGSML"
   # Windows is excluded on purpose rather than by omission: a Windows user
   # already has msolap, and the whole point of this extension is to reach SSAS
-  # without COM. macOS needs MIT krb5 from Homebrew, because Apple's
-  # GSS.framework exports no gss_wrap_iov and no NTLM mechanism and therefore
-  # cannot seal a message at all.
-  excluded_platforms: "windows_amd64;windows_amd64_mingw;windows_arm64;wasm_mvp;wasm_eh;wasm_threads"
+  # without COM.
+  #
+  # macOS is excluded because a macOS build cannot be REDISTRIBUTED. Apple's
+  # GSS.framework exports no gss_wrap_iov and no NTLM mechanism, so it cannot
+  # seal a message at all and MIT krb5 from Homebrew is the only option there.
+  # Homebrew's krb5 is keg-only and ships no static archives, so the extension
+  # links the dylibs and records their install names verbatim —
+  # `otool -L` on the built extension shows
+  # /opt/homebrew/opt/krb5/lib/libgssapi_krb5.2.2.dylib. The artifact then loads
+  # only on a machine with that exact prefix populated. A registry builder has
+  # no Homebrew krb5 at all, so the build would fail there rather than publish
+  # something that half works. macOS remains a supported LOCAL build; see the
+  # README.
+  excluded_platforms: "windows_amd64;windows_amd64_mingw;windows_arm64;osx_amd64;osx_arm64;wasm_mvp;wasm_eh;wasm_threads"
 
 repo:
   github: "hugr-lab/xmla-extention"

@@ -65,6 +65,15 @@ if(PkgConfig_FOUND)
         # Where pkg-config reports no library directory -- the ordinary Linux
         # case, where the libraries are on the default search path -- the plain
         # name is kept and the linker resolves it as before.
+        #
+        # On macOS this also fixes the RUNTIME dependency to the Homebrew prefix:
+        # Homebrew's krb5 sets each dylib's LC_ID_DYLIB to its opt path, so the
+        # consumer records /opt/homebrew/opt/krb5/lib/libgssapi_krb5.2.2.dylib
+        # (verified with `otool -L`) and the extension loads only where that
+        # prefix is populated. Linking the archives instead would avoid it, and
+        # the Homebrew bottle ships none. So a macOS build is a LOCAL build:
+        # osx_amd64 and osx_arm64 are in excluded_platforms in description.yml,
+        # and the README says so next to the brew instruction.
         set(XMLA_GSS_LIBRARIES "")
         foreach(xmla_gss_lib IN LISTS XMLA_GSSAPI_LIBRARIES XMLA_KRB5_LIBRARIES)
             find_library(XMLA_GSS_LIB_${xmla_gss_lib}

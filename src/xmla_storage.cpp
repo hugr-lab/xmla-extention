@@ -20,14 +20,18 @@ unique_ptr<Catalog> XmlaAttach(optional_ptr<StorageExtensionInfo>, ClientContext
 
 	// ATTACH options are accepted as an alternative to the connection string,
 	// which is what a user reaching for `(TYPE xmla, SECRET my_secret)` expects.
+	// `options.options` is what DuckDB did NOT recognise. It has already
+	// consumed and removed `type`, `read_only`/`readonly`,
+	// `read_write`/`readwrite`, `recovery_mode`, `default_table`, `hidden` and
+	// `vacuum_rebuild_indexes` (attached_database.cpp, AttachOptions'
+	// constructor), so a `key == "type" || key == "read_only"` arm here was dead
+	// code — the loop never saw either.
 	for (auto &option : options.options) {
 		const auto key = StringUtil::Lower(option.first);
 		if (key == "secret") {
 			params.secret_name = option.second.ToString();
 		} else if (key == "catalog") {
 			params.catalog = option.second.ToString();
-		} else if (key == "type" || key == "read_only") {
-			continue;  // handled by DuckDB
 		} else {
 			throw BinderException("xmla: unknown ATTACH option '%s'. Known: secret, catalog", key);
 		}
@@ -49,12 +53,37 @@ unique_ptr<Catalog> XmlaAttach(optional_ptr<StorageExtensionInfo>, ClientContext
 
 	// An EXPLICIT request to attach read-write is refused rather than quietly
 	// downgraded: the caller asked for something this extension cannot provide,
-	// and saying so is more useful than appearing to comply. AUTOMATIC — the
-	// default, meaning "unspecified" — is not a request and is left alone.
-	if (options.access_mode == AccessMode::READ_WRITE) {
-		throw BinderException(
-			"xmla: an Analysis Services attachment is read-only; "
-			"remove READ_ONLY false from the ATTACH options");
+	// and saying so is more useful than appearing to comply.
+	//
+	// Decided from the RAW STATEMENT OPTIONS, not from options.access_mode.
+	// access_mode is seeded from the session's own DBConfig
+	// (physical_attach.cpp: `AttachOptions(info->options,
+	// config.options.access_mode)`) and only overwritten when the statement
+	// carried a read-only or read-write option — so READ_WRITE there does not
+	// mean the caller asked for it. On a database opened with
+	// access_mode=read_write (duckdb_open_ext, python config={'access_mode':
+	// 'read_write'}, JDBC duckdb.read_only=false) a plain
+	// `ATTACH '…' AS aw (TYPE xmla)` was refused, naming an option the user
+	// never wrote. Reproduced through the C API before this was changed.
+	//
+	// AttachInfo::options still carries the statement's own options verbatim:
+	// AttachOptions copies from it and does not mutate it.
+	for (auto &option : info.options) {
+		const auto key = StringUtil::Lower(option.first);
+		const bool says_read_only = (key == "read_only" || key == "readonly");
+		const bool says_read_write = (key == "read_write" || key == "readwrite");
+		if (!says_read_only && !says_read_write) {
+			continue;
+		}
+		// `READ_ONLY false` and `READ_WRITE true` are the same request.
+		const bool wants_write =
+			BooleanValue::Get(option.second.DefaultCastAs(LogicalType::BOOLEAN)) == says_read_write;
+		if (wants_write) {
+			throw BinderException(
+				"xmla: an Analysis Services attachment is read-only; remove %s from the ATTACH "
+				"options",
+				StringUtil::Upper(key));
+		}
 	}
 
 	// Resolve at ATTACH so a missing port or an absent secret is reported HERE

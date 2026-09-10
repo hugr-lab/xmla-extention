@@ -172,6 +172,36 @@ ATTACH 'host=example.invalid port=2383' AS rw (TYPE xmla, READ_ONLY false);
 ----
 read-only
 
+# The same request said the other way round.
+statement error
+ATTACH 'host=example.invalid port=2383' AS rw2 (TYPE xmla, READ_WRITE true);
+----
+read-only
+
+# And the refusal reads the STATEMENT'S options, not the session's access_mode.
+# options.access_mode is seeded from DBConfig and only overwritten when the
+# statement carried one of these keys, so a database opened with
+# access_mode=read_write made a plain `ATTACH ... (TYPE xmla)` fail while naming
+# an option the user never wrote. That configuration cannot be reached from SQL
+# — `SET access_mode` is refused after startup — so it is asserted through the C
+# API instead; these two cases pin the half that IS reachable.
+statement ok
+ATTACH 'host=example.invalid port=2383' AS ro5 (TYPE xmla, READ_ONLY true);
+
+statement ok
+ATTACH 'host=example.invalid port=2383' AS ro6 (TYPE xmla, READ_WRITE false);
+
+query I
+SELECT count(*) FROM duckdb_databases() WHERE database_name IN ('ro5', 'ro6') AND readonly;
+----
+2
+
+statement ok
+DETACH ro5;
+
+statement ok
+DETACH ro6;
+
 # An unknown ATTACH option is refused rather than ignored.
 statement error
 ATTACH 'host=example.invalid port=2383' AS ro2 (TYPE xmla, NONSENSE 'x');
@@ -312,3 +342,66 @@ spn must be of the form
 # `user` and `password` have no server-free observable — proving they arrived
 # means watching what the security layer sends — so they are covered by the live
 # probe rather than by a test here that would only assert they are not rejected.
+
+# A secret of the WRONG TYPE is refused by name.
+#
+# The sibling half of the port fix above, and the same shape of mistake:
+# SecretManager::GetSecretByName does not filter by type, so `secret=<an s3 or
+# http secret>` was accepted, every TryGetValue missed, and the connection
+# proceeded with no user, no password and the Kerberos default — presenting as
+# an authentication failure rather than as the naming mistake it is.
+#
+# `http` is a core secret type, registered with no extension loaded, so this
+# needs nothing beyond DuckDB itself.
+statement ok
+CREATE SECRET notxmla (TYPE http, BEARER_TOKEN 'x');
+
+statement error
+SELECT * FROM xmla_discover('secret=notxmla', 'DBSCHEMA_CATALOGS');
+----
+not 'xmla'
+
+# --- the option parsers ------------------------------------------------------
+
+# An unrecognised boolean is an error, not a silent false. `use_port` selects
+# between two different SPNs, so `use_port=flase` quietly meaning false presents
+# as a Kerberos failure with no hint at the cause.
+statement error
+SELECT * FROM xmla_discover('host=example.invalid port=2383 use_port=flase', 'DBSCHEMA_CATALOGS');
+----
+must be true or false
+
+# ... and the message names the OPTION, not the value the caller wrote: a
+# connection string's contents reach the query log (constitution I), which is the
+# same reason the malformed-string case above asserts no echo.
+statement error
+SELECT * FROM xmla_discover('host=example.invalid port=2383 use_port=flase', 'DBSCHEMA_CATALOGS');
+----
+use_port must be true or false
+
+# A timeout needs an UPPER bound as well as a lower one. `!(parsed > 0)` alone
+# accepts `inf` — strtod consumes the whole string — and any finite monster like
+# 1e300. Both reach SocketChannel, where `static_cast<time_t>(seconds)` and
+# `static_cast<long long>(seconds * 1000)` are undefined behaviour outside the
+# target's range.
+statement error
+SELECT * FROM xmla_discover('host=example.invalid port=2383 timeout=inf', 'DBSCHEMA_CATALOGS');
+----
+at most 86400
+
+statement error
+SELECT * FROM xmla_discover('host=example.invalid port=2383 timeout=1e300', 'DBSCHEMA_CATALOGS');
+----
+at most 86400
+
+# The lower bound still holds, and so does a legitimate value: the ceiling must
+# not have replaced the floor.
+statement error
+SELECT * FROM xmla_discover('host=example.invalid port=2383 timeout=0', 'DBSCHEMA_CATALOGS');
+----
+positive number of seconds
+
+statement error
+SELECT * FROM xmla_discover('host=example.invalid port=2383 timeout=5', 'DBSCHEMA_CATALOGS');
+----
+could not resolve the instance address

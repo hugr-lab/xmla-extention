@@ -92,11 +92,10 @@ struct XmlaScanState : public GlobalTableFunctionState {
 	std::unique_ptr<xmla::Session> session;
 	std::unique_ptr<xmla::RowCursor> cursor;
 
-	//! Output column for each column the cursor has discovered, or -1 for one
-	//! this scan did not ask for. Grown as the cursor's column list grows.
-	vector<int64_t> cell_to_output;
-	//! Every name a requested column might come back under -> its output index.
-	std::map<std::string, idx_t> name_to_output;
+	//! Which output column each discovered column belongs to. Lives in the
+	//! protocol layer so it can be tested without DuckDB — the derivation it
+	//! replaced could not be, and was written wrong twice.
+	xmla::ColumnMap columns;
 	//! Reused across rows so the per-row cells are not reallocated.
 	std::vector<xmla::Cell> row;
 	bool exhausted = false;
@@ -186,6 +185,9 @@ unique_ptr<GlobalTableFunctionState> ScanInit(ClientContext &context, TableFunct
 	// A row id or a virtual column has no counterpart on the server; it is
 	// dropped here and left NULL in the output.
 	vector<std::string> wanted;
+	// The requested columns in OUTPUT order. The same list as `wanted` until an
+	// unsafe name clears that one.
+	vector<std::string> output_names;
 	bool all_safe = DaxSafeName(bind_data.table_name);
 	for (idx_t out = 0; out < input.column_ids.size(); out++) {
 		const auto column_id = input.column_ids[out];
@@ -195,19 +197,12 @@ unique_ptr<GlobalTableFunctionState> ScanInit(ClientContext &context, TableFunct
 		const std::string &name = bind_data.columns[column_id];
 		all_safe = all_safe && DaxSafeName(name);
 		wanted.push_back(name);
-		// Three name forms, because which one comes back depends on the query
-		// DAX ran. `EVALUATE 'DimProduct'` qualifies its columns as
-		// `DimProduct[ProductKey]`; an aliased SELECTCOLUMNS projection returns
-		// the alias, which SSAS encodes as `[ProductKey]` and the rowset scanner
-		// decodes back to that; and a bare name is what a plain rowset carries.
-		//
-		// Accepting all three is deliberate belt-and-braces. Committing to one
-		// and being wrong does not fail — it silently returns a column of NULL,
-		// which has already happened twice.
-		state->name_to_output.emplace(name, out);
-		state->name_to_output.emplace(bind_data.table_name + "[" + name + "]", out);
-		state->name_to_output.emplace("[" + name + "]", out);
+		output_names.push_back(name);
 	}
+	// Which name forms a column may come back under, and which output each maps
+	// to, is xmla::ColumnMap's business — see its comment for why that is in the
+	// protocol layer and not here.
+	state->columns = xmla::ColumnMap(bind_data.table_name, output_names);
 	if (!all_safe) {
 		// One unsafe name disables the whole projection rather than part of it:
 		// a partial projection would return fewer columns than the plan expects.
@@ -270,13 +265,7 @@ void ScanExecute(ClientContext &, TableFunctionInput &data, DataChunk &output) {
 			// null in every row so far has not been seen yet. So the mapping is
 			// extended here rather than resolved once — and never derived from
 			// the first row, which is the shape of the all-NULL bug.
-			const auto &discovered = state.cursor->columns();
-			while (state.cell_to_output.size() < discovered.size()) {
-				const auto &name = discovered[state.cell_to_output.size()];
-				const auto found = state.name_to_output.find(name);
-				state.cell_to_output.push_back(
-					found == state.name_to_output.end() ? -1 : static_cast<int64_t>(found->second));
-			}
+			state.columns.Extend(state.cursor->columns());
 
 			// Start every value NULL. XMLA OMITS a null column from a row rather
 			// than sending it empty, so absence IS null — distinct from the empty
@@ -285,10 +274,7 @@ void ScanExecute(ClientContext &, TableFunctionInput &data, DataChunk &output) {
 				validities[col]->SetInvalid(count);
 			}
 			for (const auto &cell : state.row) {
-				if (cell.column >= state.cell_to_output.size()) {
-					continue;
-				}
-				const int64_t out = state.cell_to_output[cell.column];
+				const int64_t out = state.columns.OutputFor(cell.column);
 				if (out < 0 || static_cast<idx_t>(out) >= columns) {
 					continue;
 				}

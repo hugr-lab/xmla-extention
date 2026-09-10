@@ -341,3 +341,89 @@ TEST_CASE("a repeated element in one row is last-wins, as the map it replaced wa
 	REQUIRE_EQ(rs.Row(0).At("A"), std::string("2"));
 	REQUIRE_EQ(rs.columns.size(), 1u);
 }
+
+// --- ColumnMap: the mapping that regressed twice, now reachable --------------
+
+TEST_CASE("a qualified result column maps to the requested bare column") {
+	// `EVALUATE 'DimProduct'` returns DimProduct[Colour], not Colour. A scan
+	// that looks up the bare name misses every row and returns all-NULL, which
+	// is exactly what the first working ATTACH did: DESCRIBE was right and
+	// SELECT was a column of nulls.
+	const std::vector<std::string> requested = {"ProductKey", "Colour"};
+	ColumnMap map("DimProduct", requested);
+	const std::vector<std::string> discovered = {"DimProduct[Colour]", "DimProduct[ProductKey]"};
+	map.Extend(discovered);
+	REQUIRE_EQ(map.OutputFor(0), 1);
+	REQUIRE_EQ(map.OutputFor(1), 0);
+}
+
+TEST_CASE("a bare result column maps too, and so does a bracketed alias") {
+	// DISCOVER and DBSCHEMA rowsets carry bare names; an aliased DAX projection
+	// returns the alias, which SSAS encodes as _x005B_Colour_x005D_ and the
+	// scanner decodes to [Colour]. All three forms have to land on the same
+	// output, because which one arrives depends on the query.
+	const std::vector<std::string> requested = {"Colour"};
+	ColumnMap bare("DimProduct", requested);
+	bare.Extend({"Colour"});
+	REQUIRE_EQ(bare.OutputFor(0), 0);
+
+	ColumnMap aliased("DimProduct", requested);
+	aliased.Extend({"[Colour]"});
+	REQUIRE_EQ(aliased.OutputFor(0), 0);
+}
+
+TEST_CASE("a column nobody asked for is dropped, not mapped to output 0") {
+	const std::vector<std::string> requested = {"Colour"};
+	ColumnMap map("DimProduct", requested);
+	map.Extend({"DimProduct[Weight]", "DimProduct[Colour]"});
+	REQUIRE_EQ(map.OutputFor(0), ColumnMap::NO_OUTPUT);
+	REQUIRE_EQ(map.OutputFor(1), 0);
+	// Past the end is NO_OUTPUT, not a read off the end: the index comes from a
+	// cell in a peer's byte stream.
+	REQUIRE_EQ(map.OutputFor(99), ColumnMap::NO_OUTPUT);
+}
+
+TEST_CASE("a column that appears only in a LATER row still maps") {
+	// The all-NULL bug, in the form it came back as: XMLA omits a null column
+	// from a row entirely, so probing row 0 for the schema finds the qualified
+	// key absent, falls back to the bare name, and then misses on every row.
+	// Extend is therefore called per row and must pick up what row 0 lacked.
+	const std::vector<std::string> requested = {"ProductKey", "Colour"};
+	ColumnMap map("DimProduct", requested);
+	map.Extend({"DimProduct[ProductKey]"});
+	REQUIRE_EQ(map.size(), 1u);
+	REQUIRE_EQ(map.OutputFor(0), 0);
+	map.Extend({"DimProduct[ProductKey]", "DimProduct[Colour]"});
+	REQUIRE_EQ(map.size(), 2u);
+	REQUIRE_EQ(map.OutputFor(1), 1);
+}
+
+TEST_CASE("the same mapping, driven from a parsed rowset end to end") {
+	// The two halves together: the parser discovers a column only on the second
+	// row, and the map still routes it. This is the whole regression in one
+	// case, and it is now hermetic.
+	RowStreamParser parser;
+	std::vector<Cell> row;
+	parser.Append("<row><DimProduct_x005B_ProductKey_x005D_>1</DimProduct_x005B_ProductKey_x005D_></row>");
+	parser.Append(
+		"<row><DimProduct_x005B_ProductKey_x005D_>2</DimProduct_x005B_ProductKey_x005D_>"
+		"<DimProduct_x005B_Colour_x005D_>Red</DimProduct_x005B_Colour_x005D_></row>");
+	parser.Finish();
+
+	const std::vector<std::string> requested = {"ProductKey", "Colour"};
+	ColumnMap map("DimProduct", requested);
+	std::vector<std::string> colour_by_row;
+	while (parser.Next(row)) {
+		std::string colour = "<null>";
+		map.Extend(parser.columns());
+		for (const auto &cell : row) {
+			if (map.OutputFor(cell.column) == 1) {
+				colour = cell.value;
+			}
+		}
+		colour_by_row.push_back(colour);
+	}
+	REQUIRE_EQ(colour_by_row.size(), 2u);
+	REQUIRE_EQ(colour_by_row[0], std::string("<null>"));
+	REQUIRE_EQ(colour_by_row[1], std::string("Red"));
+}

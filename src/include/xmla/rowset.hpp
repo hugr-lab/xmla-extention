@@ -12,6 +12,7 @@
 #pragma once
 
 #include <cstdint>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -170,6 +171,58 @@ private:
 
 	std::vector<std::string> columns_;
 	std::vector<Cell> row_;
+};
+
+//! Map the column names a response actually carries onto the columns a caller
+//! asked for.
+//!
+//! This lives in the protocol layer, with no DuckDB in sight, for one reason:
+//! the equivalent logic has been written wrong TWICE in the scan and both times
+//! the symptom was a column of NULL rather than an error. It was unreachable
+//! from the hermetic suite while it sat in the extension's translation unit, so
+//! the only thing exercising it was a live probe that does not run in CI. It is
+//! pure — names in, positions out — so there was never a reason for it to be
+//! there.
+//!
+//! Three name forms are accepted for each requested column, because which one
+//! comes back depends on the query that produced the rowset:
+//!
+//!   `Colour`             a DISCOVER or DBSCHEMA rowset carries bare names
+//!   `DimProduct[Colour]` `EVALUATE 'DimProduct'` qualifies its result columns
+//!   `[Colour]`           an aliased DAX projection returns the alias, which
+//!                        SSAS encodes as `_x005B_Colour_x005D_`
+//!
+//! Accepting all three is deliberate. Committing to one and being wrong does not
+//! fail loudly; it silently returns nulls.
+class ColumnMap {
+public:
+	//! Returned for a column no caller asked for.
+	static const int64_t NO_OUTPUT = -1;
+
+	ColumnMap() = default;
+	ColumnMap(const std::string &table, const std::vector<std::string> &requested);
+
+	//! Extend the mapping to cover every name in `discovered`.
+	//!
+	//! Cheap to call per row, and it MUST be: a rowset's column list grows as
+	//! rows arrive, because a column that is null in every row so far has not
+	//! been seen yet. Resolving once against the first row is the bug this
+	//! class exists to make testable.
+	void Extend(const std::vector<std::string> &discovered);
+
+	//! Output position for the discovered column at `index`, or NO_OUTPUT.
+	int64_t OutputFor(size_t index) const {
+		return index < mapping_.size() ? mapping_[index] : NO_OUTPUT;
+	}
+
+	//! How many discovered columns have been mapped so far.
+	size_t size() const {
+		return mapping_.size();
+	}
+
+private:
+	std::map<std::string, int64_t> keys_;
+	std::vector<int64_t> mapping_;
 };
 
 //! Parse a complete XMLA rowset response. Matches on LOCAL element names, so the

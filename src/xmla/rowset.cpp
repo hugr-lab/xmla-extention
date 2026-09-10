@@ -447,6 +447,28 @@ bool RowStreamParser::Next(std::vector<Cell> &out) {
 	}
 }
 
+const int64_t ColumnMap::NO_OUTPUT;
+
+ColumnMap::ColumnMap(const std::string &table, const std::vector<std::string> &requested) {
+	for (size_t i = 0; i < requested.size(); i++) {
+		const int64_t out = static_cast<int64_t>(i);
+		const std::string &name = requested[i];
+		// emplace, not [] — the FIRST requested column wins a name two of them
+		// could both claim, so a duplicate request cannot silently redirect an
+		// earlier one.
+		keys_.emplace(name, out);
+		keys_.emplace(table + "[" + name + "]", out);
+		keys_.emplace("[" + name + "]", out);
+	}
+}
+
+void ColumnMap::Extend(const std::vector<std::string> &discovered) {
+	while (mapping_.size() < discovered.size()) {
+		const auto found = keys_.find(discovered[mapping_.size()]);
+		mapping_.push_back(found == keys_.end() ? NO_OUTPUT : found->second);
+	}
+}
+
 Rowset ParseRowset(const std::string &text) {
 	// One scanner, two entry points. Everything this function used to do inline
 	// now lives in RowStreamParser, so the streaming path and the whole-document

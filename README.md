@@ -68,7 +68,7 @@ real illustration is a welcome first contribution. Nothing depends on the file.
 | `SELECT` on a multidimensional model | not supported — row scans need DAX `EVALUATE`; use `xmla_execute` with MDX |
 | Kerberos | **unverified against a live server** — see below |
 | Linux | supported |
-| macOS | needs MIT krb5 (`brew install krb5`); Apple's GSS.framework cannot seal |
+| macOS | **local build only** — needs MIT krb5 (`brew install krb5`); Apple's GSS.framework cannot seal |
 | Windows | not a target — you already have `msolap` |
 
 Discovery, catalog listing and metadata retrieval complete over NTLM. `DBSCHEMA_COLUMNS`
@@ -97,6 +97,19 @@ machine whose SSAS can only speak NTLM. It is marked UNVERIFIED rather than clai
   Homebrew). It is the only native dependency — sealing is done by the security context, so
   there is no TLS library involved.
 - **`gss-ntlmssp`** if you need NTLM.
+
+On **macOS** that means `brew install krb5` followed by
+`PKG_CONFIG_PATH=$(brew --prefix krb5)/lib/pkgconfig`. Apple's GSS.framework is not an
+option: it declares the IOV types and exports neither `gss_wrap_iov` nor `gss_unwrap_iov`,
+and ships no NTLM mechanism, so it cannot seal a message at all.
+
+A macOS build is a **local build**, not a redistributable one. Homebrew's krb5 is keg-only
+and ships no static archives, so the extension links the dylibs and records their install
+names verbatim — `otool -L` on the result shows
+`/opt/homebrew/opt/krb5/lib/libgssapi_krb5.2.2.dylib`. The artifact therefore loads only
+where that prefix is populated, which is why macOS is in `excluded_platforms` in
+`description.yml` rather than published to the community registry. Linux builds have no such
+constraint: krb5 is on the default library path there and the plain library name is used.
 
 ## Credentials
 
