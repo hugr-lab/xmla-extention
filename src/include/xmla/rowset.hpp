@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <map>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace xmla {
@@ -148,10 +149,17 @@ public:
 		return columns_;
 	}
 
-	//! Bytes held but not yet consumed. A caller that feeds from a socket uses
-	//! this to bound what an unterminated document can accumulate.
+	//! Bytes the parser is still holding.
+	//!
+	//! What it RETAINS, not what it has yet to look at — the two differ, and the
+	//! difference is the whole point. While a value's text is still arriving the
+	//! scanner's position runs to the end of the buffer (there is no further
+	//! markup to find), so "unconsumed" reads as ZERO while every byte from that
+	//! value's start onwards has to be kept and memory grows without limit.
+	//! `buffer_.size() - pos_` was the first definition and it made the cap
+	//! built on it fire never. A caller feeding from a socket bounds THIS.
 	size_t buffered() const {
-		return buffer_.size() - pos_;
+		return buffer_.size();
 	}
 
 private:
@@ -200,7 +208,18 @@ public:
 	static const int64_t NO_OUTPUT = -1;
 
 	ColumnMap() = default;
-	ColumnMap(const std::string &table, const std::vector<std::string> &requested);
+
+	//! `requested` pairs each column name with the OUTPUT POSITION it feeds.
+	//!
+	//! The position is explicit, not the index in the list, because the caller's
+	//! output positions and its list of names diverge: a scan skips a column id
+	//! with no server counterpart (a row id, or the EMPTY placeholder `count(*)`
+	//! asks for) and its remaining names compact while its output positions do
+	//! not. Deriving the position from list order therefore mapped the first
+	//! real column after a skip to output 0 instead of 1 — and the symptom of
+	//! that is a requested column arriving all NULL with no error, which is the
+	//! exact failure this class was extracted to make testable.
+	ColumnMap(const std::string &table, const std::vector<std::pair<std::string, int64_t>> &requested);
 
 	//! Extend the mapping to cover every name in `discovered`.
 	//!

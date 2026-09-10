@@ -63,6 +63,22 @@ class Session;
 //! read off the socket and there is no way back to a record boundary.
 class RowCursor {
 public:
+	//! Ceiling on what the parser may hold without producing a row.
+	//!
+	//! MessageStream caps the bytes it buffers, but that cap became PER RECORD
+	//! once records were consumed one at a time — so a peer streaming records
+	//! that form no complete row grew the parser without limit. This is the
+	//! missing cap. It is smaller than MessageStream's 64 MiB on purpose: an
+	//! unterminated comment makes every feed re-search the pending region, so
+	//! the work before the cap fires is on the order of the limit squared over
+	//! the read size, and 16 MiB keeps that under a second where 64 MiB does
+	//! not. A legitimate document never approaches it — the parser retains at
+	//! most one row plus a partial tag, because compaction reclaims the rest.
+	//!
+	//! Overridable for the same reason MessageStream's is: a test that had to
+	//! push 16 MiB through the fake provider to reach it would not be written.
+	static const size_t DEFAULT_PARSER_LIMIT = 16 * 1024 * 1024;
+
 	~RowCursor();
 	RowCursor(const RowCursor &) = delete;
 	RowCursor &operator=(const RowCursor &) = delete;
@@ -87,7 +103,7 @@ public:
 
 private:
 	friend class Session;
-	explicit RowCursor(Session &session);
+	RowCursor(Session &session, size_t parser_limit);
 
 	//! Read one DIME record, unseal it, and feed the parser.
 	void Pump();
@@ -103,6 +119,8 @@ private:
 	//! because it exists to inspect a header and not to buffer a rowset.
 	std::string head_;
 	static const size_t HEAD_LIMIT = 64 * 1024;
+	size_t parser_limit_;
+
 	bool head_checked_ = false;
 	bool complete_ = false;
 	bool drained_ = false;
@@ -155,7 +173,8 @@ public:
 	//! Same read-only validation as Execute - the guard is on the statement, so
 	//! it does not care how the answer is read. The returned cursor borrows this
 	//! session; destroy it first.
-	std::unique_ptr<RowCursor> ExecuteCursor(const std::string &statement, const std::string &catalog = std::string());
+	std::unique_ptr<RowCursor> ExecuteCursor(const std::string &statement, const std::string &catalog = std::string(),
+											 size_t parser_limit = RowCursor::DEFAULT_PARSER_LIMIT);
 
 	State state() const {
 		return state_;

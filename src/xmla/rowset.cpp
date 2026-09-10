@@ -315,7 +315,11 @@ const std::string &Rowset::RowView::At(const std::string &name) const {
 }
 
 Rowset::RowView Rowset::Row(size_t i) const {
-	if (i + 1 >= row_starts.size()) {
+	// Against the row COUNT, not `i + 1` against the offset array. `i + 1 >=
+	// row_starts.size()` overflows: for i == SIZE_MAX it is 0, which is not >= a
+	// size that is always at least 1, so the guard passed and row_starts[SIZE_MAX]
+	// was read. An out-of-bounds read, in the check written to prevent one.
+	if (i >= size()) {
 		// These indices come from a peer's byte stream by way of a caller's
 		// arithmetic. An empty view is a wrong answer; reading off the end is a
 		// crash.
@@ -374,14 +378,28 @@ void RowStreamParser::SetCell(uint32_t column, std::string value) {
 }
 
 void RowStreamParser::Compact() {
-	// Only BETWEEN rows. Inside one, pending_from_ is an absolute offset into
-	// the buffer and dropping a prefix would silently shift the text a value is
-	// read from.
-	if (pos_ == 0 || row_depth_ >= 0 || !pending_field_.empty()) {
+	// Everything already consumed, whether or not a row is open.
+	//
+	// This used to give up as soon as a row was open, on the grounds that
+	// pending_from_ is an absolute offset and dropping a prefix would shift the
+	// text a value is read from. True, and the answer is to shift the offset
+	// rather than to stop: a peer that opens a <row> and never closes it — or
+	// sends it endless children — otherwise grows this buffer for the rest of
+	// the document with nothing to reclaim it, and a cap on the UNCONSUMED bytes
+	// does not see it because those stay small while the buffer grows.
+	size_t upto = pos_;
+	if (!pending_field_.empty() && pending_from_ < upto) {
+		// A field is open and its text starts here, unread. Keep it.
+		upto = pending_from_;
+	}
+	if (upto == 0) {
 		return;
 	}
-	buffer_.erase(0, pos_);
-	pos_ = 0;
+	buffer_.erase(0, upto);
+	pos_ -= upto;
+	if (!pending_field_.empty()) {
+		pending_from_ -= upto;
+	}
 }
 
 bool RowStreamParser::Next(std::vector<Cell> &out) {
@@ -419,6 +437,13 @@ bool RowStreamParser::Next(std::vector<Cell> &out) {
 				out.clear();
 				out.swap(row_);
 				row_depth_ = -1;
+				// Defensive. Reaching here needs depth_ == row_depth_ after the
+				// decrement, and the branch above — which clears this — fires at
+				// row_depth_ + 1, so the two are mutually exclusive and no input
+				// was found that leaves a field open across an emitted row. If
+				// one exists, a stale name would attach the NEXT row's first
+				// value to the wrong column, and it would do it silently.
+				pending_field_.clear();
 				return true;
 			}
 			continue;
@@ -449,10 +474,10 @@ bool RowStreamParser::Next(std::vector<Cell> &out) {
 
 const int64_t ColumnMap::NO_OUTPUT;
 
-ColumnMap::ColumnMap(const std::string &table, const std::vector<std::string> &requested) {
-	for (size_t i = 0; i < requested.size(); i++) {
-		const int64_t out = static_cast<int64_t>(i);
-		const std::string &name = requested[i];
+ColumnMap::ColumnMap(const std::string &table, const std::vector<std::pair<std::string, int64_t>> &requested) {
+	for (const auto &entry : requested) {
+		const std::string &name = entry.first;
+		const int64_t out = entry.second;
 		// emplace, not [] — the FIRST requested column wins a name two of them
 		// could both claim, so a duplicate request cannot silently redirect an
 		// earlier one.

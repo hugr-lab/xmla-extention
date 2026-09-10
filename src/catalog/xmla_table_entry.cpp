@@ -3,66 +3,13 @@
 #include "duckdb/catalog/catalog_entry/schema_catalog_entry.hpp"
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/parser/parsed_data/create_table_info.hpp"
+#include "xmla/dax.hpp"
 #include "xmla/errors.hpp"
 #include "xmla_connection.hpp"
 
 namespace duckdb {
 
 namespace {
-
-//===--------------------------------------------------------------------===//
-// DAX rendering
-//
-// Every identifier that reaches a DAX query is CHECKED rather than escaped.
-// Escaping is the usual answer and it is the weaker one here: these names come
-// from the server's own DBSCHEMA_COLUMNS, so a name carrying `]` or a quote is
-// either a server this client should not trust or a case nobody has tested, and
-// in both situations the right move is to stop pushing down and send the query
-// that was already known to work. Refusing costs a slower scan; a mis-escaped
-// bracket costs a DAX expression the caller never wrote.
-//===--------------------------------------------------------------------===//
-
-//! Whether a name may appear inside a DAX identifier this code composes.
-bool DaxSafeName(const std::string &name) {
-	if (name.empty()) {
-		return false;
-	}
-	for (const char c : name) {
-		const unsigned char byte = static_cast<unsigned char>(c);
-		if (byte < 0x20 || byte == 0x7F) {
-			return false;  // control characters, including the newlines a comment could hide behind
-		}
-		if (c == '[' || c == ']' || c == '\'' || c == '"') {
-			return false;
-		}
-	}
-	return true;
-}
-
-//! `'Table'` — a DAX table reference. The caller has already checked the name.
-std::string DaxTable(const std::string &table) {
-	return "'" + table + "'";
-}
-
-//! `'Table'[Column]` — a DAX column reference.
-std::string DaxColumn(const std::string &table, const std::string &column) {
-	return DaxTable(table) + "[" + column + "]";
-}
-
-//! A DAX string literal. `"` is the only character that needs doubling, and it
-//! is doubled rather than refused because this is a VALUE, not an identifier: a
-//! caller's own search term legitimately contains quotes.
-std::string DaxString(const std::string &value) {
-	std::string out = "\"";
-	for (const char c : value) {
-		if (c == '"') {
-			out.push_back('"');
-		}
-		out.push_back(c);
-	}
-	out.push_back('"');
-	return out;
-}
 
 //! Bind data holds only PARAMETERS and the pushed-down DAX. No rows.
 //!
@@ -141,73 +88,33 @@ struct XmlaScanState : public GlobalTableFunctionState {
 // than from either schema rowset.
 //===--------------------------------------------------------------------===//
 
-//! The DAX to send, and the output columns it will produce.
-//!
-//! `EVALUATE 'T'` returns every column of the table. That is what a scan sent
-//! whatever the query asked for, so a narrow SELECT over a wide table paid for
-//! all of it.
-//!
-//! Measured against a live SQL Server 2022 tabular model, 60398-row fact table,
-//! 2026-09:
-//!
-//!     all 3 columns, whole table   EVALUATE 'T'      37.07 s
-//!     1 of 3 columns, whole table  SELECTCOLUMNS      2.22 s
-//!     all 3 columns, LIMIT 5       EVALUATE 'T'       0.27 s   (early abandon)
-//!
-//! SELECTCOLUMNS is the one construct here with a version floor: it needs a
-//! tabular model at compatibility level 1200 or above (SSAS 2016+). UNVERIFIED
-//! against anything older — no such instance is available to this project —
-//! which is why it is used ONLY when it actually reduces the transfer. A
-//! `SELECT *` still travels the plain `EVALUATE 'T'` path, which is the one that
-//! has been exercised against a live instance since the first working scan.
-std::string BuildDax(const XmlaScanBindData &bind_data, const vector<std::string> &wanted) {
-	const std::string source = DaxTable(bind_data.table_name);
-	// Only when it actually narrows. A `SELECT *` therefore still travels the
-	// plain `EVALUATE 'T'` path, which is the one exercised against a live
-	// instance from the start.
-	const bool project = bind_data.columns_known && !wanted.empty() && wanted.size() < bind_data.columns.size();
-	if (!project) {
-		return "EVALUATE " + source;
-	}
-	std::string projection = "SELECTCOLUMNS(" + source;
-	for (const auto &column : wanted) {
-		projection += ", " + DaxString(column) + ", " + DaxColumn(bind_data.table_name, column);
-	}
-	projection += ")";
-	return "EVALUATE " + projection;
-}
-
 unique_ptr<GlobalTableFunctionState> ScanInit(ClientContext &context, TableFunctionInitInput &input) {
 	auto &bind_data = input.bind_data->Cast<XmlaScanBindData>();
 	auto state = make_uniq<XmlaScanState>();
 
 	// The projection, in the order the executor expects the output columns.
-	// A row id or a virtual column has no counterpart on the server; it is
-	// dropped here and left NULL in the output.
+	//
+	// A column id with no counterpart on the server — a row id, or the EMPTY
+	// placeholder `count(*)` asks for — is skipped here and left NULL in the
+	// output. Its OUTPUT POSITION is carried explicitly rather than inferred
+	// from list order: the two diverge at exactly that skip, and inferring it
+	// mapped the first real column afterwards to output 0 instead of 1, which
+	// shows up as a requested column arriving all NULL.
 	vector<std::string> wanted;
-	// The requested columns in OUTPUT order. The same list as `wanted` until an
-	// unsafe name clears that one.
-	vector<std::string> output_names;
-	bool all_safe = DaxSafeName(bind_data.table_name);
+	vector<std::pair<std::string, int64_t>> requested;
 	for (idx_t out = 0; out < input.column_ids.size(); out++) {
 		const auto column_id = input.column_ids[out];
 		if (column_id >= bind_data.columns.size()) {
 			continue;
 		}
 		const std::string &name = bind_data.columns[column_id];
-		all_safe = all_safe && DaxSafeName(name);
 		wanted.push_back(name);
-		output_names.push_back(name);
+		requested.emplace_back(name, static_cast<int64_t>(out));
 	}
 	// Which name forms a column may come back under, and which output each maps
 	// to, is xmla::ColumnMap's business — see its comment for why that is in the
 	// protocol layer and not here.
-	state->columns = xmla::ColumnMap(bind_data.table_name, output_names);
-	if (!all_safe) {
-		// One unsafe name disables the whole projection rather than part of it:
-		// a partial projection would return fewer columns than the plan expects.
-		wanted.clear();
-	}
+	state->columns = xmla::ColumnMap(bind_data.table_name, requested);
 
 	// `count(*)` asks for no real column at all — it takes the EMPTY virtual
 	// column instead. The server still has to send something, so ONE column is
@@ -215,12 +122,13 @@ unique_ptr<GlobalTableFunctionState> ScanInit(ClientContext &context, TableFunct
 	// every cell it produces is dropped and only the row count survives. Without
 	// this the fallback is `EVALUATE 'T'`, and counting rows would transfer the
 	// whole table.
-	if (wanted.empty() && bind_data.columns_known && all_safe && !bind_data.columns.empty() &&
-		DaxSafeName(bind_data.columns[0])) {
+	if (wanted.empty() && bind_data.columns_known && !bind_data.columns.empty()) {
 		wanted.push_back(bind_data.columns[0]);
 	}
 
-	const std::string dax = BuildDax(bind_data, wanted);
+	// Composing the statement — and deciding whether a projection is safe and
+	// worth sending at all — is xmla::dax's business, and it is tested there.
+	const std::string dax = xmla::dax::Evaluate(bind_data.table_name, wanted, bind_data.columns.size());
 	try {
 		state->session = OpenSession(context, bind_data.params);
 		state->cursor = state->session->ExecuteCursor(dax, bind_data.ssas_catalog);
@@ -371,7 +279,7 @@ TableFunction XmlaTableEntry::GetScanFunction(ClientContext &, unique_ptr<Functi
 	// The projection reaches the server as a SELECTCOLUMNS list, so a narrow
 	// SELECT over a wide table transfers narrow.
 	scan.projection_pushdown = true;
-	// No filter pushdown, in either form. See the block comment above BuildDax
+	// No filter pushdown, in either form. See the block comment above ScanInit
 	// for the measurement that decided it.
 	scan.filter_pushdown = false;
 	bind_data = std::move(result);

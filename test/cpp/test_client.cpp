@@ -403,3 +403,71 @@ TEST_CASE("a response that does not decrypt to XML is refused, streaming too") {
 	std::vector<Cell> row;
 	REQUIRE_THROWS_EXACTLY(ProtocolError, cursor->Next(row));
 }
+
+TEST_CASE("an EMPTY unsealed response is refused, not reported as zero rows") {
+	// The one case the "not xml at all" case above does not reach. CheckHead
+	// returned immediately while head_ was empty, so a response whose plaintext
+	// is empty — a zero-length reply, or frames that unseal to nothing — set
+	// complete_ with the guard never having run: Next() reported drained and a
+	// scan produced zero rows with no error. This layer documents an empty
+	// rowset as a MEANINGFUL answer, so a framing or decrypt failure then
+	// presents as "the table is empty".
+	FakeSealProvider server_side(16, 512);
+	auto chan = AuthenticatedChannel(server_side, "", 0, 0);
+
+	Session session(Target(), Credential());
+	session.Open(chan, std::unique_ptr<GssContext>(new FakeGssContext(1, 16, 512)));
+
+	auto cursor = session.ExecuteCursor("EVALUATE 'T'");
+	std::vector<Cell> row;
+	REQUIRE_THROWS_EXACTLY(ProtocolError, cursor->Next(row));
+	// The whole-message path rejects the identical bytes, which is the point:
+	// the two must not disagree about what an empty response means.
+	auto chan2 = AuthenticatedChannel(server_side, "", 0, 0);
+	Session whole(Target(), Credential());
+	whole.Open(chan2, std::unique_ptr<GssContext>(new FakeGssContext(1, 16, 512)));
+	REQUIRE_THROWS_EXACTLY(ProtocolError, whole.Execute("EVALUATE 'T'"));
+}
+
+TEST_CASE("a response that never completes a row is bounded, and says so") {
+	// MessageStream caps what IT buffers, but that cap became per-record once
+	// records were consumed one at a time, and the plaintext accumulates in the
+	// parser instead. A peer streaming records that form no complete row grew
+	// memory without limit.
+	std::string endless = "<root><row><A>";
+	endless.append(200000, 'x');
+	FakeSealProvider server_side(16, 512);
+	auto chan = AuthenticatedChannel(server_side, endless, 4096, 0);
+
+	Session session(Target(), Credential());
+	session.Open(chan, std::unique_ptr<GssContext>(new FakeGssContext(1, 16, 512)));
+
+	// A small limit, for the same reason MessageStream's is overridable: a test
+	// that had to push 16 MiB through the fake provider to reach the real one
+	// would not be written, and an untested cap is not a cap.
+	auto cursor = session.ExecuteCursor("EVALUATE 'T'", std::string(), 32 * 1024);
+	std::vector<Cell> row;
+	REQUIRE_THROWS_EXACTLY(ProtocolError, cursor->Next(row));
+}
+
+TEST_CASE("a cursor destroyed after its session was closed does not crash") {
+	// The destructor dereferenced session_.stream_ unconditionally, and
+	// Session::Close() resets it — as does Session's destructor, which calls
+	// Close(). The scan gets the order right by member declaration order and by
+	// resetting the cursor first, both load-bearing and unenforced on what is
+	// now public protocol-layer API.
+	FakeSealProvider server_side(16, 512);
+	auto chan = AuthenticatedChannel(server_side, EvaluateDocument(50), 200, 0);
+
+	Session session(Target(), Credential());
+	session.Open(chan, std::unique_ptr<GssContext>(new FakeGssContext(1, 16, 512)));
+	{
+		auto cursor = session.ExecuteCursor("EVALUATE 'T'");
+		std::vector<Cell> row;
+		REQUIRE(cursor->Next(row));
+		REQUIRE(!cursor->complete());
+		// Out of order on purpose: the cursor is still alive.
+		session.Close();
+	}
+	REQUIRE(session.state() == State::CLOSED);
+}

@@ -303,10 +303,17 @@ TEST_CASE("the column union GROWS as rows arrive") {
 	REQUIRE_EQ(parser.columns()[1], std::string("LATE"));
 }
 
-TEST_CASE("an unterminated construct does not rescan from the start each feed") {
-	// NextTag reports how far it skipped so the parser can resume there. Without
-	// it, a document arriving in n pieces rescans every earlier comment n times,
-	// which is quadratic in a length the peer chooses.
+TEST_CASE("an unterminated construct does not rescan EARLIER ones each feed") {
+	// NextTag reports how far it skipped so the parser can resume there, so a
+	// construct already skipped is not skipped again.
+	//
+	// This does NOT say the terminator search inside the UNTERMINATED construct
+	// is bounded — it is not. Resumption is at that construct's '<', so every
+	// feed re-searches the pending region. What bounds it is
+	// RowCursor::PARSER_LIMIT, which caps the pending region and turns the cost
+	// into a bounded amount of work ending in an error. An earlier version of
+	// this case claimed the stronger property in its NAME while asserting only
+	// that Next() returns false.
 	RowStreamParser parser;
 	std::vector<Cell> row;
 	parser.Append("<!-- ");
@@ -349,7 +356,7 @@ TEST_CASE("a qualified result column maps to the requested bare column") {
 	// that looks up the bare name misses every row and returns all-NULL, which
 	// is exactly what the first working ATTACH did: DESCRIBE was right and
 	// SELECT was a column of nulls.
-	const std::vector<std::string> requested = {"ProductKey", "Colour"};
+	const std::vector<std::pair<std::string, int64_t>> requested = {{"ProductKey", 0}, {"Colour", 1}};
 	ColumnMap map("DimProduct", requested);
 	const std::vector<std::string> discovered = {"DimProduct[Colour]", "DimProduct[ProductKey]"};
 	map.Extend(discovered);
@@ -362,7 +369,7 @@ TEST_CASE("a bare result column maps too, and so does a bracketed alias") {
 	// returns the alias, which SSAS encodes as _x005B_Colour_x005D_ and the
 	// scanner decodes to [Colour]. All three forms have to land on the same
 	// output, because which one arrives depends on the query.
-	const std::vector<std::string> requested = {"Colour"};
+	const std::vector<std::pair<std::string, int64_t>> requested = {{"Colour", 0}};
 	ColumnMap bare("DimProduct", requested);
 	bare.Extend({"Colour"});
 	REQUIRE_EQ(bare.OutputFor(0), 0);
@@ -373,7 +380,7 @@ TEST_CASE("a bare result column maps too, and so does a bracketed alias") {
 }
 
 TEST_CASE("a column nobody asked for is dropped, not mapped to output 0") {
-	const std::vector<std::string> requested = {"Colour"};
+	const std::vector<std::pair<std::string, int64_t>> requested = {{"Colour", 0}};
 	ColumnMap map("DimProduct", requested);
 	map.Extend({"DimProduct[Weight]", "DimProduct[Colour]"});
 	REQUIRE_EQ(map.OutputFor(0), ColumnMap::NO_OUTPUT);
@@ -388,7 +395,7 @@ TEST_CASE("a column that appears only in a LATER row still maps") {
 	// from a row entirely, so probing row 0 for the schema finds the qualified
 	// key absent, falls back to the bare name, and then misses on every row.
 	// Extend is therefore called per row and must pick up what row 0 lacked.
-	const std::vector<std::string> requested = {"ProductKey", "Colour"};
+	const std::vector<std::pair<std::string, int64_t>> requested = {{"ProductKey", 0}, {"Colour", 1}};
 	ColumnMap map("DimProduct", requested);
 	map.Extend({"DimProduct[ProductKey]"});
 	REQUIRE_EQ(map.size(), 1u);
@@ -410,7 +417,7 @@ TEST_CASE("the same mapping, driven from a parsed rowset end to end") {
 		"<DimProduct_x005B_Colour_x005D_>Red</DimProduct_x005B_Colour_x005D_></row>");
 	parser.Finish();
 
-	const std::vector<std::string> requested = {"ProductKey", "Colour"};
+	const std::vector<std::pair<std::string, int64_t>> requested = {{"ProductKey", 0}, {"Colour", 1}};
 	ColumnMap map("DimProduct", requested);
 	std::vector<std::string> colour_by_row;
 	while (parser.Next(row)) {
@@ -426,4 +433,64 @@ TEST_CASE("the same mapping, driven from a parsed rowset end to end") {
 	REQUIRE_EQ(colour_by_row.size(), 2u);
 	REQUIRE_EQ(colour_by_row[0], std::string("<null>"));
 	REQUIRE_EQ(colour_by_row[1], std::string("Red"));
+}
+
+TEST_CASE("an output position is what the caller SAID, not the list index") {
+	// A scan skips a column id with no server counterpart — a row id, or the
+	// EMPTY placeholder count(*) asks for — so its names compact while its
+	// output positions do not. Deriving the position from list order mapped the
+	// first real column after a skip to output 0 instead of 1, and the symptom
+	// is a requested column arriving all NULL with no error.
+	const std::vector<std::pair<std::string, int64_t>> requested = {{"Colour", 1}};
+	ColumnMap map("DimProduct", requested);
+	map.Extend({"DimProduct[Colour]"});
+	REQUIRE_EQ(map.OutputFor(0), 1);
+}
+
+TEST_CASE("compaction reclaims consumed bytes INSIDE an open row") {
+	// A peer that opens a <row> and sends endless children never closes it, so
+	// compaction that gives up while a row is open has nothing to reclaim for
+	// the rest of the document — and a cap on the UNCONSUMED bytes does not see
+	// it, because those stay small while the buffer grows. buffered() is the
+	// observable: it must not grow with the number of children consumed.
+	RowStreamParser parser;
+	std::vector<Cell> row;
+	parser.Append("<root><row>");
+	REQUIRE(!parser.Next(row));
+	for (int i = 0; i < 500; i++) {
+		parser.Append("<A>0123456789012345678901234567890123456789</A>");
+		REQUIRE(!parser.Next(row));
+	}
+	// One child's worth, not five hundred.
+	REQUIRE(parser.buffered() < 512u);
+	parser.Append("</row></root>");
+	REQUIRE(parser.Next(row));
+	REQUIRE_EQ(row.size(), 1u);
+}
+
+TEST_CASE("a pending value straddling a compaction survives it") {
+	// Compaction inside a row shifts pending_from_, and getting that wrong reads
+	// the value from the wrong offset — silently, because any offset yields SOME
+	// text.
+	RowStreamParser parser;
+	std::vector<Cell> row;
+	parser.Append("<row><A>1</A><B>the value");
+	REQUIRE(!parser.Next(row));
+	parser.Append(" continues</B></row>");
+	REQUIRE(parser.Next(row));
+	REQUIRE_EQ(row.size(), 2u);
+	REQUIRE_EQ(parser.columns()[row[0].column], std::string("A"));
+	REQUIRE_EQ(row[0].value, std::string("1"));
+	REQUIRE_EQ(parser.columns()[row[1].column], std::string("B"));
+	REQUIRE_EQ(row[1].value, std::string("the value continues"));
+}
+
+TEST_CASE("a row index of SIZE_MAX is an empty view, not an overflowed check") {
+	// `i + 1 >= row_starts.size()` overflows: for SIZE_MAX it is 0, which is not
+	// >= a size that is always at least 1, so the guard passed and
+	// row_starts[SIZE_MAX] was read.
+	const Rowset rs = ParseRowset("<row><A>1</A></row>");
+	REQUIRE_EQ(rs.Row(static_cast<size_t>(-1)).size(), 0u);
+	REQUIRE(rs.Row(static_cast<size_t>(-1)).Find("A") == nullptr);
+	REQUIRE_EQ(rs.Row(static_cast<size_t>(-2)).size(), 0u);
 }

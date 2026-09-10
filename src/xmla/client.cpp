@@ -242,14 +242,15 @@ void Session::SendRequest(const std::string &payload) {
 	stream_->SendMessage(sealing::SealMessage(*seal_, body), dime::OptionsNegotiated());
 }
 
-std::unique_ptr<RowCursor> Session::ExecuteCursor(const std::string &statement, const std::string &catalog) {
+std::unique_ptr<RowCursor> Session::ExecuteCursor(const std::string &statement, const std::string &catalog,
+												  size_t parser_limit) {
 	RequireAuthenticated();
 	SendRequest(envelopes::Execute(statement, catalog, session_id_));
 	// Not make_unique: the constructor is private and Session is its friend.
-	return std::unique_ptr<RowCursor>(new RowCursor(*this));
+	return std::unique_ptr<RowCursor>(new RowCursor(*this, parser_limit));
 }
 
-RowCursor::RowCursor(Session &session) : session_(session) {
+RowCursor::RowCursor(Session &session, size_t parser_limit) : session_(session), parser_limit_(parser_limit) {
 	unsealer_.reset(new sealing::Unsealer(*session.seal_));
 }
 
@@ -261,8 +262,20 @@ RowCursor::~RowCursor() {
 	// records are NOT read: reading them would transfer exactly the bytes this
 	// exists to avoid. That leaves the socket mid-message, so the session is
 	// marked failed and the connection is not reused.
-	session_.stream_->AbandonMessage();
-	session_.state_ = State::FAILED;
+	//
+	// Guarded, because Session::Close() resets stream_ and Session's destructor
+	// calls Close(): a cursor destroyed after its session was closed dereferenced
+	// null. The scan gets the order right by member declaration order and by
+	// resetting the cursor before closing, but both are load-bearing and
+	// unenforced on what is now public protocol-layer API, so a mis-ordered
+	// teardown degrades to a leaked response rather than a crash.
+	if (session_.stream_) {
+		session_.stream_->AbandonMessage();
+		// FAILED only when there was something to abandon. A session already
+		// closed is CLOSED, and overwriting that with FAILED would report a
+		// fault where there was an orderly shutdown.
+		session_.state_ = State::FAILED;
+	}
 }
 
 const std::vector<std::string> &RowCursor::columns() const {
@@ -270,7 +283,15 @@ const std::vector<std::string> &RowCursor::columns() const {
 }
 
 void RowCursor::CheckHead() {
-	if (head_.empty()) {
+	// Only while the response is still ARRIVING. An unconditional early return
+	// here meant a response whose plaintext is empty — a zero-length reply, or
+	// frames that unseal to nothing — reached complete_ with the guard never
+	// having run: Next() reported drained and the scan produced zero rows with
+	// no error. This layer documents an empty rowset as a MEANINGFUL answer, so
+	// a framing or decrypt failure then presents as "the table is empty", which
+	// is the indistinguishable emptiness the guard exists to prevent. The
+	// whole-message path rejects the same bytes.
+	if (head_.empty() && !complete_) {
 		return;
 	}
 	// An empty rowset is a MEANINGFUL answer - "no rows visible to this account"
@@ -302,12 +323,23 @@ void RowCursor::CheckHead() {
 	session_.RaiseForFault(head_, /*during_authentication=*/false);
 }
 
+const size_t RowCursor::DEFAULT_PARSER_LIMIT;
+const size_t RowCursor::HEAD_LIMIT;
+
 void RowCursor::Feed(const Bytes &plain) {
 	if (plain.empty()) {
 		return;
 	}
 	const char *bytes = reinterpret_cast<const char *>(plain.data());
 	parser_.Append(bytes, plain.size());
+	// The cap that MessageStream's stopped being once records are consumed one
+	// at a time. Checked AFTER the append and before the next read, so the
+	// overshoot is one record rather than unbounded.
+	if (parser_.buffered() > parser_limit_) {
+		throw ProtocolError("buffered " + std::to_string(parser_.buffered()) +
+							" bytes of response without a complete row (limit " + std::to_string(parser_limit_) +
+							"); the document is unterminated or the stream is desynchronised");
+	}
 	if (head_.size() < HEAD_LIMIT) {
 		// May overshoot by one frame, which is the point: the limit bounds the
 		// prefix, it does not have to split a frame to hit it exactly.
