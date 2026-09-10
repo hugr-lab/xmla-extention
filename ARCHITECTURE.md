@@ -80,9 +80,9 @@ Every message after the handshake is sealed and wrapped in a 4-byte header:
 
 **Ciphertext first, token second** — the inverse of GSS ordering. Getting it backwards is
 silently fatal: the server closes the connection with no error and logs nothing. [MS-SSAS]
-does not document this layer at all; it was recovered from `AdomdClient`'s
-`TcpSecureStream.WriteHeader` and `TcpEncryptedStream.WriteInBlockMode`, and is cited as a
-finding rather than reproduced as code (see the constitution's Provenance Boundary).
+does not document this layer at all; it was established by studying how Microsoft's own
+client frames these messages, and is recorded as a finding about the wire format rather
+than as code (see the constitution's Provenance Boundary).
 
 Two details that cost days to rediscover:
 

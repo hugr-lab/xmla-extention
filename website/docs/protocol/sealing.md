@@ -16,11 +16,10 @@ bytes   token       tokenSize bytes
 getting it backwards is silently fatal: the server closes the connection with no
 error and logs nothing. Nine framing attempts failed before this settled.
 
-`[MS-SSAS]` does not document this layer at all. It was recovered from
-`AdomdClient`'s `TcpSecureStream.WriteHeader` and
-`TcpEncryptedStream.WriteInBlockMode`, and is cited here as a **finding** rather
-than reproduced as code — no decompiled source is vendored or committed, and that
-boundary is what keeps the project distributable.
+`[MS-SSAS]` does not document this layer at all. It was established by studying
+how Microsoft's own client frames these messages, and is recorded here as a
+**finding** about the wire format rather than as code — nothing third-party is
+copied into or shipped with this project.
 
 Two details that cost days to rediscover:
 

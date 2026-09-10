@@ -101,10 +101,12 @@ no scrubber can reliably redact arbitrary token structure.
 
 ## Provenance
 
-The sealed-frame layout was recovered by reading a decompilation of Microsoft's
-client. This repository contains **findings only** — no decompiled source is
-copied, vendored or committed — and that boundary is what keeps the project
-distributable.
+The sealed-frame layout is not in `[MS-SSAS]`; it was established by studying how
+Microsoft's own client frames these messages. This repository contains
+**findings only** — statements about the wire format, and no third-party source
+of any kind. That boundary is what keeps the project distributable, and it is a
+standing rule rather than a one-off: see the Provenance Boundary in
+`.specify/memory/constitution.md`.
 
 ## Where the decisions live
 
