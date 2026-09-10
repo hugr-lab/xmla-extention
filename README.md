@@ -494,6 +494,9 @@ macOS host and changes across restarts.
 
 ## Documentation
 
+- **[hugr-lab.github.io/xmla-extention](https://hugr-lab.github.io/xmla-extention/)** — the
+  documentation site: getting started, the tabular and cube paths, the protocol, a function
+  and option reference, limitations and troubleshooting. Built from `website/`.
 - [ARCHITECTURE.md](ARCHITECTURE.md) — the layer stack, how messages get split, current status
 - `specs/001-xmla-tcp-binding/` — the specification, the plan, and every decision with what
   settled it

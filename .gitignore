@@ -26,3 +26,9 @@ vcpkg_installed/
 compile_commands.json
 # roborev snapshots
 /.roborev/
+
+# Docusaurus (website/). The lock file IS committed - pages.yml and
+# docs-build.yml both run `npm ci`, which requires it and fails without it.
+website/node_modules/
+website/build/
+website/.docusaurus/
