@@ -97,6 +97,7 @@ endif()
 # Analysis Services instance (constitution III), and T-032 enforces it.
 # =============================================================================
 set(XMLA_PROTOCOL_SOURCES
+    src/xmla/connection_string.cpp
     src/xmla/dime.cpp
     src/xmla/transport.cpp
     src/xmla/sealing.cpp
@@ -178,7 +179,12 @@ if(COMMAND build_loadable_extension)
     #
     # The layering rule is unaffected: it is enforced at SOURCE level by
     # scripts/ci/check_layering.sh, not by which library a file lands in.
-    set(XMLA_EXTENSION_SOURCES src/xmla_extension.cpp ${XMLA_PROTOCOL_SOURCES})
+    set(XMLA_EXTENSION_SOURCES
+        src/xmla_extension.cpp
+        src/xmla_connection.cpp
+        src/xmla_secret.cpp
+        src/xmla_functions.cpp
+        ${XMLA_PROTOCOL_SOURCES})
     if(XMLA_GSS_FOUND)
         list(APPEND XMLA_EXTENSION_SOURCES src/xmla/gss_context.cpp)
     endif()

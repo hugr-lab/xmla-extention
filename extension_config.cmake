@@ -6,12 +6,13 @@
 # reported version becomes a 10-character commit hash. `LOAD xmla` would then
 # report something no release note mentions.
 #
-# LOAD_TESTS is NOT set. It registers <source>/test/sql as the sqllogictest path,
-# and no such directory exists yet — test/ holds cpp, gss and hooks. The path
-# being non-empty means the build's own FATAL_ERROR does not fire; the unittest
-# binary is simply handed a directory that globs to nothing. It goes back when
-# there is a SQL surface to test, which is T-034..T-037.
+# LOAD_TESTS registers <source>/test/sql as the sqllogictest path. It is back now
+# that test/sql exists and has something to say; it was removed while the
+# directory was absent, where the path being non-empty meant the build's own
+# FATAL_ERROR did not fire and the unittest binary was simply handed a directory
+# that globbed to nothing.
 duckdb_extension_load(xmla
     SOURCE_DIR ${CMAKE_CURRENT_LIST_DIR}
     EXTENSION_VERSION "0.0.1"
+    LOAD_TESTS
 )

@@ -168,3 +168,30 @@ TEST_CASE("an unmatched leading close tag does not silence the whole rowset") {
 	REQUIRE_EQ(many.size(), 1u);
 	REQUIRE_EQ(many.rows[0].at("B"), std::string("2"));
 }
+
+TEST_CASE("SSAS XML name encoding is decoded in column names") {
+	// EVALUATE ROW("answer", 42) returns a column literally named
+	// _x005B_answer_x005D_ — that is [answer]. Unusable as a SQL column name
+	// and unrecognisable to whoever wrote the query.
+	const Rowset rs = ParseRowset("<row><_x005B_answer_x005D_>42</_x005B_answer_x005D_></row>");
+	REQUIRE_EQ(rs.columns.size(), 1u);
+	REQUIRE_EQ(rs.columns[0], std::string("[answer]"));
+	REQUIRE_EQ(rs.rows[0].at("[answer]"), std::string("42"));
+}
+
+TEST_CASE("a name that merely contains _x is left alone") {
+	// Only an exact _xHHHH_ is an escape. A column genuinely called my_x_axis
+	// must survive, and so must a truncated or non-hex sequence.
+	const char *untouched[] = {"my_x_axis", "_xZZZZ_", "_x12_", "col_x", "_x005B", "a_xa_b"};
+	for (const char *name : untouched) {
+		const std::string doc = std::string("<row><") + name + ">v</" + name + "></row>";
+		const Rowset rs = ParseRowset(doc);
+		REQUIRE_EQ(rs.columns.size(), 1u);
+		REQUIRE_EQ(rs.columns[0], std::string(name));
+	}
+}
+
+TEST_CASE("a self-closing encoded column decodes too") {
+	const Rowset rs = ParseRowset("<row><_x0020_gap/></row>");
+	REQUIRE_EQ(rs.columns[0], std::string(" gap"));
+}

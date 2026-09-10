@@ -15,6 +15,66 @@ bool XmlSpace(char c) {
 	return c == ' ' || c == '\t' || c == '\r' || c == '\n';
 }
 
+//! Decode the XML name encoding SSAS uses for rowset column names.
+//!
+//! A character that cannot appear in an XML element name is escaped as
+//! `_xHHHH_`, the four-hex-digit code point. `EVALUATE ROW("answer", 42)`
+//! therefore comes back as a column literally named `_x005B_answer_x005D_`,
+//! which is `[answer]` — unusable as a SQL column name and unrecognisable to
+//! whoever wrote the query.
+//!
+//! Only an exact `_xHHHH_` is decoded. Anything else is left alone, so a column
+//! genuinely named `my_x_axis` survives.
+std::string DecodeXmlName(const std::string &name) {
+	if (name.find("_x") == std::string::npos) {
+		return name;  // the overwhelmingly common case
+	}
+	std::string out;
+	out.reserve(name.size());
+	size_t i = 0;
+	while (i < name.size()) {
+		// _xHHHH_ is exactly 7 characters.
+		if (name[i] == '_' && i + 6 < name.size() && (name[i + 1] == 'x' || name[i + 1] == 'X') && name[i + 6] == '_') {
+			unsigned long cp = 0;
+			bool hex = true;
+			for (size_t k = i + 2; k < i + 6; k++) {
+				const char c = name[k];
+				unsigned digit;
+				if (c >= '0' && c <= '9') {
+					digit = static_cast<unsigned>(c - '0');
+				} else if (c >= 'a' && c <= 'f') {
+					digit = static_cast<unsigned>(c - 'a' + 10);
+				} else if (c >= 'A' && c <= 'F') {
+					digit = static_cast<unsigned>(c - 'A' + 10);
+				} else {
+					hex = false;
+					break;
+				}
+				cp = cp * 16 + digit;
+			}
+			// Surrogates are not scalar values; leaving the escape intact is
+			// better than emitting CESU-8, for the same reason as in
+			// DecodeEntities.
+			if (hex && cp != 0 && !(cp >= 0xD800 && cp <= 0xDFFF)) {
+				if (cp < 0x80) {
+					out.push_back(static_cast<char>(cp));
+				} else if (cp < 0x800) {
+					out.push_back(static_cast<char>(0xC0 | (cp >> 6)));
+					out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+				} else {
+					out.push_back(static_cast<char>(0xE0 | (cp >> 12)));
+					out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+					out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+				}
+				i += 7;
+				continue;
+			}
+		}
+		out.push_back(name[i++]);
+	}
+	return out;
+}
+
 //! Local name of a possibly-prefixed tag: "urn:x:row" and "r:row" both give "row".
 std::string LocalName(const std::string &qname) {
 	const size_t colon = qname.rfind(':');
@@ -243,17 +303,18 @@ Rowset ParseRowset(const std::string &text) {
 			// A self-closing child of <row> is an empty value, which is distinct
 			// from an absent column.
 			if (row_depth >= 0 && depth == row_depth + 1) {
+				const std::string field = DecodeXmlName(local);
 				bool known = false;
 				for (const auto &c : out.columns) {
-					if (c == local) {
+					if (c == field) {
 						known = true;
 						break;
 					}
 				}
 				if (!known) {
-					out.columns.push_back(local);
+					out.columns.push_back(field);
 				}
-				row[local] = std::string();
+				row[field] = std::string();
 			}
 			continue;
 		}
@@ -265,7 +326,7 @@ Rowset ParseRowset(const std::string &text) {
 			continue;
 		}
 		if (row_depth >= 0 && depth == row_depth + 1) {
-			pending_field = local;
+			pending_field = DecodeXmlName(local);
 			pending_from = tag.end;
 		}
 		depth++;

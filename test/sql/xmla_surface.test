@@ -1,0 +1,128 @@
+# name: test/sql/xmla_surface.test
+# description: the SQL surface that can be checked WITHOUT a server
+# group: [xmla]
+#
+# Everything here is server-free on purpose. Constitution III: the default suite
+# must pass on a machine that has never contacted an Analysis Services instance.
+# Anything needing a live instance belongs in the probe (scripts/run-probe.sh).
+
+require xmla
+
+# The extension loads and reports the version description.yml publishes, not a
+# commit hash — which is what it reported before EXTENSION_VERSION was set.
+query I
+SELECT extension_version FROM duckdb_extensions() WHERE extension_name = 'xmla';
+----
+0.0.1
+
+# Both table functions are registered.
+query II
+SELECT function_name, function_type FROM duckdb_functions()
+WHERE function_name IN ('xmla_discover', 'xmla_execute') ORDER BY function_name;
+----
+xmla_discover	table
+xmla_execute	table
+
+# The secret type is registered, and a password never appears in the secret's
+# printed form.
+statement ok
+CREATE SECRET s1 (TYPE xmla, MECHANISM 'ntlm', USER 'someone', PASSWORD 'hunter2');
+
+query I
+SELECT secret_string NOT LIKE '%hunter2%' FROM duckdb_secrets() WHERE name = 's1';
+----
+true
+
+query I
+SELECT secret_string LIKE '%password=redacted%' FROM duckdb_secrets() WHERE name = 's1';
+----
+true
+
+# An unknown secret field is refused rather than stored and ignored: a
+# misspelled 'passwrd' would otherwise leave the secret silently without one.
+#
+# DuckDB rejects it first, from the function's declared named_parameters, so this
+# asserts DuckDB's message rather than the extension's. The extension keeps its
+# own check as a backstop for a field that is declared but not handled — a state
+# only a future edit can create.
+statement error
+CREATE SECRET s2 (TYPE xmla, PASSWRD 'x');
+----
+Unknown parameter
+
+# A port is required. There is no default and no named-instance redirector, and
+# a wrong guess presents as a hang rather than an error.
+statement error
+SELECT * FROM xmla_discover('host=example.invalid', 'DBSCHEMA_CATALOGS');
+----
+port is required
+
+statement error
+SELECT * FROM xmla_discover('port=2383', 'DBSCHEMA_CATALOGS');
+----
+host is required
+
+# A port outside range is refused, not silently truncated: atoi would turn 65538
+# into port 2.
+statement error
+SELECT * FROM xmla_discover('host=example.invalid port=65538', 'DBSCHEMA_CATALOGS');
+----
+port must be a number in 1..65535
+
+# An unknown option is an error. Ignoring one means a typo'd mechanism silently
+# authenticates with something the caller did not ask for.
+statement error
+SELECT * FROM xmla_discover('host=example.invalid port=2383 mechansim=ntlm', 'DBSCHEMA_CATALOGS');
+----
+unknown connection option
+
+# A password may not travel in a connection string: that string reaches the
+# query log and the plan.
+statement error
+SELECT * FROM xmla_discover('host=example.invalid port=2383 password=x', 'DBSCHEMA_CATALOGS');
+----
+may not be given in the connection string
+
+# A malformed connection string is refused, and the message does not echo it.
+statement error
+SELECT * FROM xmla_discover('this is not a pair', 'DBSCHEMA_CATALOGS');
+----
+not a sequence of key=value pairs
+
+# Read-only by validation. <Statement> carries the whole command surface, so
+# these all build a well-formed envelope a server would accept and apply.
+#
+# `host=example.invalid` cannot resolve, which is the point: these are refused
+# BEFORE any connection is attempted. The guard used to run inside
+# Session::Execute — after the socket, the handshake and the sealing context — so
+# these reported a connection failure instead, and against a reachable host would
+# have spent a full authenticated round trip to reach a verdict that depends on
+# nothing but the string.
+statement error
+SELECT * FROM xmla_execute('host=example.invalid port=2383', 'UPDATE CUBE [S] SET (m) = 0');
+----
+read-only
+
+statement error
+SELECT * FROM xmla_execute('host=example.invalid port=2383', 'DROP MINING MODEL [M]');
+----
+read-only
+
+statement error
+SELECT * FROM xmla_execute('host=example.invalid port=2383', 'CALL SystemRestoreBackup(''x'')');
+----
+read-only
+
+# A statement batch is refused even though it opens with a query keyword: SSMS
+# sends semicolon-separated MDX as a single Execute/Statement.
+statement error
+SELECT * FROM xmla_execute('host=example.invalid port=2383', 'EVALUATE T; UPDATE CUBE [S] SET (m) = 0');
+----
+statement separator
+
+# A named secret that does not exist is named as such, rather than surfacing as
+# an authentication failure later.
+statement error
+SELECT * FROM xmla_discover('host=example.invalid port=2383 secret=nope', 'DBSCHEMA_CATALOGS');
+----
+not found
