@@ -62,6 +62,8 @@ real illustration is a welcome first contribution. Nothing depends on the file.
 |---|---|
 | NTLM, end to end | **works**, verified against SQL Server 2022 on tabular and multidimensional instances |
 | `ATTACH`, `SHOW ALL TABLES`, `DESCRIBE`, `SELECT` | **works** on a tabular model |
+| MDX against a cube, via `xmla_execute` | **works** — the client asks for `Format=Tabular`, so a cellset arrives as rows |
+| `MDSCHEMA_CUBES` / `_MEASURES` / `_DIMENSIONS` / `_HIERARCHIES` / `_LEVELS` | **works** — ordinary table functions, so they join |
 | Projection pushdown | **works** — a narrow `SELECT` sends a DAX `SELECTCOLUMNS` list, not the whole table |
 | `LIMIT` | **works** by stopping the read, not by a DAX clause; DuckDB passes no limit to a scan |
 | Filter pushdown | not done — DAX refuses a text literal against a numeric column, and no non-admin rowset says which columns those are (research D14) |
@@ -173,6 +175,123 @@ Measured on a 60398-row fact table with three columns:
 Columns arrive as `VARCHAR`. The rowset that is supposed to report a column's type reports
 `WSTR` for all of them, so a real type mapping needs a different source (T-041) — and
 guessing a type from a value would not be honest.
+
+## A cube session, end to end
+
+Everything below is a real transcript against a live SQL Server 2022
+multidimensional instance. Only the host, account and password are replaced.
+
+```sql
+CREATE SECRET md (TYPE xmla, HOST '<instance>', PORT 2384,
+                  MECHANISM 'ntlm', USER '<user>', PASSWORD '<password>');
+```
+
+**What cubes are there** — `MDSCHEMA_CUBES` is "show all cubes":
+
+```sql
+SELECT CUBE_NAME, CUBE_TYPE, LAST_SCHEMA_UPDATE
+FROM xmla_discover('secret=md', 'MDSCHEMA_CUBES', catalog := 'AWMultidim');
+```
+```
+┌───────────┬───────────┬────────────────────────────┐
+│ CUBE_NAME │ CUBE_TYPE │     LAST_SCHEMA_UPDATE     │
+├───────────┼───────────┼────────────────────────────┤
+│ AWCube    │ CUBE      │ 2026-08-19T18:20:52.233333 │
+└───────────┴───────────┴────────────────────────────┘
+```
+
+**What is in it** — measures, dimensions, and the hierarchy levels joined to
+their hierarchies. These are ordinary table functions, so they join:
+
+```sql
+SELECT MEASURE_NAME, MEASURE_UNIQUE_NAME, MEASUREGROUP_NAME, DATA_TYPE
+FROM xmla_discover('secret=md', 'MDSCHEMA_MEASURES', catalog := 'AWMultidim');
+
+SELECT h.HIERARCHY_UNIQUE_NAME, l.LEVEL_NAME, l.LEVEL_NUMBER, l.LEVEL_CARDINALITY
+FROM xmla_discover('secret=md', 'MDSCHEMA_LEVELS', catalog := 'AWMultidim') l
+JOIN xmla_discover('secret=md', 'MDSCHEMA_HIERARCHIES', catalog := 'AWMultidim') h
+  ON h.HIERARCHY_UNIQUE_NAME = l.HIERARCHY_UNIQUE_NAME
+ORDER BY l.LEVEL_UNIQUE_NAME;
+```
+```
+┌──────────────┬───────────────────────────┬───────────────────┬───────────┐
+│ MEASURE_NAME │    MEASURE_UNIQUE_NAME    │ MEASUREGROUP_NAME │ DATA_TYPE │
+├──────────────┼───────────────────────────┼───────────────────┼───────────┤
+│ Sales Amount │ [Measures].[Sales Amount] │ Internet Sales    │ 6         │
+└──────────────┴───────────────────────────┴───────────────────┴───────────┘
+
+┌─────────────────────────┬───────────────┬──────────────┬───────────────────┐
+│  HIERARCHY_UNIQUE_NAME  │  LEVEL_NAME   │ LEVEL_NUMBER │ LEVEL_CARDINALITY │
+├─────────────────────────┼───────────────┼──────────────┼───────────────────┤
+│ [Measures]              │ MeasuresLevel │ 0            │ 1                 │
+│ [Product].[Product Key] │ (All)         │ 0            │ 1                 │
+│ [Product].[Product Key] │ Product Key   │ 1            │ 607               │
+└─────────────────────────┴───────────────┴──────────────┴───────────────────┘
+```
+
+**Query it with MDX.** `xmla_execute` sends the statement and hands back rows:
+
+```sql
+SELECT * FROM xmla_execute('secret=md',
+  'SELECT {[Measures].[Sales Amount]} ON COLUMNS,
+          TOPCOUNT([Product].[Product Key].[Product Key].MEMBERS, 5,
+                   [Measures].[Sales Amount]) ON ROWS
+   FROM [AWCube]', catalog := 'AWMultidim');
+```
+```
+┌────────────────────────────────────────────────────────┬───────────────────────────┐
+│ [Product].[Product Key].[Product Key].[MEMBER_CAPTION] │ [Measures].[Sales Amount] │
+├────────────────────────────────────────────────────────┼───────────────────────────┤
+│ Road-150 Red, 48                                       │ 1205876.99                │
+│ Road-150 Red, 62                                       │ 1202298.72                │
+│ Road-150 Red, 52                                       │ 1080637.54                │
+│ Road-150 Red, 56                                       │ 1055589.65                │
+│ Road-150 Red, 44                                       │ 1005493.87                │
+└────────────────────────────────────────────────────────┴───────────────────────────┘
+```
+
+A cellset has axes and cells, not rows, so the client asks for
+`Format=Tabular` and the server flattens it. Without that property an MDX query
+returned **zero rows and no error** — see "Reading the output" below.
+
+**`SELECT` on a cube is refused, and says what to use instead.** A
+multidimensional model has no DAX, so its tables list but cannot be scanned:
+
+```sql
+ATTACH 'secret=md catalog=AWMultidim' AS cube (TYPE xmla);
+SELECT * FROM cube.AWMultidim.Product LIMIT 3;
+-- Not implemented Error: xmla: 'Product' is in a multidimensional model, whose
+-- rows cannot be read as a table. Multidimensional data is queried with MDX —
+-- use xmla_execute() — while a tabular model's tables support SELECT directly.
+```
+
+`SHOW ALL TABLES` still lists it with its columns, because that needs no scan.
+`DESCRIBE` does not, because DuckDB binds a scan to answer it.
+
+### Reading the output
+
+Two things are worth knowing before you build on this, because both are the
+server's shape rather than a choice made here.
+
+**MDX result columns keep their MDX unique names.** `[Product].[Product Key].[Product Key].[MEMBER_CAPTION]`
+is what the flattened cellset calls that column, and renaming it would mean
+guessing which part the caller wanted. Alias it in SQL if you want something
+shorter:
+
+```sql
+SELECT "[Product].[Product Key].[Product Key].[MEMBER_CAPTION]" AS product,
+       "[Measures].[Sales Amount]"                             AS sales
+FROM xmla_execute(...);
+```
+
+**Some metadata columns are raw OLE DB codes.** `DATA_TYPE` is `6` for that
+measure (currency), and `DIMENSION_TYPE` is `2` for `[Measures]` and `3` for
+`[Product]`. They are passed through as the server sent them: decoding them
+means shipping a table of enumeration values, and this project does not state a
+protocol claim it has not verified. `CUBE_TYPE` arrives as text (`CUBE`)
+because the server sends it that way.
+
+Everything arrives as `VARCHAR` — see "How a scan behaves".
 
 ## Nothing identifying gets committed
 

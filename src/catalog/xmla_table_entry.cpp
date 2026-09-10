@@ -257,11 +257,19 @@ TableFunction XmlaTableEntry::GetScanFunction(ClientContext &, unique_ptr<Functi
 		//
 		// The metadata still works: this catalog's schemas and tables list fine,
 		// and xmla_execute carries MDX for anyone who wants to write it.
+		// GetIdentifierName(), not `name`: an Identifier formats itself QUOTED
+		// when it needs quoting, so `%s` on it produced '"Product"' — a name
+		// inside two kinds of quotes, in a message whose whole job is to tell
+		// the reader which table it means.
+		//
+		// This also fires for DESCRIBE, because DuckDB binds a scan to answer
+		// it. The columns are still listed by SHOW ALL TABLES, which needs no
+		// scan.
 		throw NotImplementedException(
 			"xmla: '%s' is in a multidimensional model, whose rows cannot be read as a table. "
 			"Multidimensional data is queried with MDX — use xmla_execute() — while a tabular "
 			"model's tables support SELECT directly.",
-			name);
+			name.GetIdentifierName());
 	}
 
 	// PARAMETERS ONLY. Nothing here contacts the server: the request goes out in

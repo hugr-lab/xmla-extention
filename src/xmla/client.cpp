@@ -186,7 +186,30 @@ Rowset Session::RoundtripRowset(const std::string &payload) {
 			"the unsealed response is not an XMLA envelope; the security "
 			"context or the frame layout is wrong");
 	}
-	return ParseRowset(text);
+
+	Rowset rows = ParseRowset(text);
+
+	// A cellset is not a rowset, and must not arrive looking like an empty one.
+	//
+	// Execute asks for Format=Tabular precisely so that an MDX query comes back
+	// as rows. Before it did, the server returned an <mddataset> — axes and
+	// cells — this scanner found no <row> in it, and every MDX query reported
+	// ZERO ROWS with no error. An empty rowset is a meaningful answer here, so
+	// there was nothing to distinguish "the cube is empty" from "the client
+	// cannot read this shape". If a server ever ignores the property, this says
+	// so instead.
+	std::string ignored;
+	// Detected by the cellset's own ELEMENTS, not by "mddataset" — that string
+	// is the namespace URI on the <root> element, so matching it as an element
+	// name finds nothing. The XMLA MDDataSet schema puts OlapInfo, Axes and
+	// CellData under that root; Axes and CellData are the two that cannot
+	// plausibly appear in a rowset.
+	if (rows.empty() && (FindElementText(text, "CellData", ignored) || FindElementText(text, "Axes", ignored))) {
+		throw ProtocolError(
+			"the server returned a multidimensional cellset rather than a rowset; "
+			"this client reads rows and asked for Format=Tabular");
+	}
+	return rows;
 }
 
 void Session::CaptureSessionId(const std::string &text) {

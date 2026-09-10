@@ -508,3 +508,43 @@ TEST_CASE("the streaming cap accepts what the whole-message path accepts") {
 	REQUIRE_EQ(row[0].value.size(), 300000u);
 	REQUIRE(!cursor->Next(row));
 }
+
+TEST_CASE("a cellset is refused, not reported as an empty rowset") {
+	// The other half of the Format=Tabular fix. If a server ignores the
+	// property, the response is an <mddataset> with no <row> in it, and this
+	// scanner would report zero rows — indistinguishable from "the cube is
+	// empty", which is a meaningful answer here.
+	const char *cellset =
+		"<Envelope><Body><ExecuteResponse><return>"
+		"<root xmlns=\"urn:schemas-microsoft-com:xml-analysis:mddataset\">"
+		"<Axes><Axis name=\"Axis0\"><Tuples><Tuple><Member><UName>[Measures].[X]</UName></Member></Tuple>"
+		"</Tuples></Axis></Axes><CellData><Cell CellOrdinal=\"0\"><Value>42</Value></Cell></CellData>"
+		"</root></return></ExecuteResponse></Body></Envelope>";
+	FakeSealProvider server_side(16, 512);
+	auto chan = std::make_shared<BytesChannel>();
+	chan->Queue(PlainResponseWire(kAuthResponse, 0));
+	chan->Queue(SealedResponseWire(server_side, cellset, 0));
+
+	Session session(Target(), Credential());
+	session.Open(chan, std::unique_ptr<GssContext>(new FakeGssContext(1, 16, 512)));
+	REQUIRE_THROWS_EXACTLY(ProtocolError, session.Execute("SELECT {[Measures].[X]} ON COLUMNS FROM [C]"));
+}
+
+TEST_CASE("a genuinely empty ROWSET is still zero rows, not an error") {
+	// The guard above must not have turned "no rows visible to this account"
+	// into a failure. That distinction is the reason the guard is narrow.
+	const char *empty =
+		"<Envelope><Body><ExecuteResponse><return>"
+		"<root xmlns=\"urn:schemas-microsoft-com:xml-analysis:rowset\"></root>"
+		"</return></ExecuteResponse></Body></Envelope>";
+	FakeSealProvider server_side(16, 512);
+	auto chan = std::make_shared<BytesChannel>();
+	chan->Queue(PlainResponseWire(kAuthResponse, 0));
+	chan->Queue(SealedResponseWire(server_side, empty, 0));
+
+	Session session(Target(), Credential());
+	session.Open(chan, std::unique_ptr<GssContext>(new FakeGssContext(1, 16, 512)));
+	const Rowset rs = session.Execute("EVALUATE T");
+	REQUIRE(rs.empty());
+	REQUIRE_EQ(rs.size(), 0u);
+}
