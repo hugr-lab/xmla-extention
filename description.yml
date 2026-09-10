@@ -17,10 +17,15 @@ extension:
 
 repo:
   github: "hugr-lab/xmla-extention"
-  # An immutable commit SHA, not a branch: the community-extensions build checks
-  # out this exact object so a published build is reproducible, and its
-  # validation rejects a branch name. Update it with each release.
-  ref: "0000000000000000000000000000000000000000"
+  # PLACEHOLDER — MUST be replaced with a real commit SHA before submitting to
+  # the community-extensions registry. All-zeroes is not a resolvable object, so
+  # a build from this file fails at checkout; that is deliberate, because the
+  # alternative (a branch name) is silently accepted here and rejected by the
+  # registry's own validation, and a stale SHA would publish the wrong tree.
+  #
+  # An immutable SHA is required because the registry checks out this exact
+  # object, so a published build is reproducible.
+  ref: "0000000000000000000000000000000000000000"  # REPLACE BEFORE SUBMITTING
 
 docs:
   hello_world: |

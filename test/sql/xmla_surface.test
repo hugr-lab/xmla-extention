@@ -224,3 +224,91 @@ could not resolve the instance address
 
 statement ok
 DETACH ro;
+
+# --- the secret -> params merge, on the HIT path ------------------------------
+#
+# Everything above about secrets tests the MISS: a name that does not resolve, a
+# field that is not declared, a password that does not appear in the printed
+# form. None of it proves a field that IS present actually reaches the
+# parameters, and that path has broken twice — once because the default was
+# applied before the secret and beat it, once because the port was taken with a
+# bare cast instead of ParsePort.
+#
+# Each case below is server-free because it names a fact that is decided before
+# the socket: validation, or the mechanism/SPN checks in GssContext::Create.
+
+statement ok
+CREATE SECRET target (TYPE xmla, HOST 'example.invalid', PORT 2383);
+
+# Host and port BOTH come from the secret. A miss on either is loud and
+# different: "host is required" or "port is required". Getting as far as address
+# resolution is the proof.
+statement error
+SELECT * FROM xmla_discover('secret=target', 'DBSCHEMA_CATALOGS');
+----
+could not resolve the instance address
+
+# ATTACH resolves the same way, so a secret is enough to attach with.
+statement ok
+ATTACH 'secret=target' AS viasecret (TYPE xmla);
+
+statement ok
+DETACH viasecret;
+
+# The port alone, with the host in the connection string.
+statement ok
+CREATE SECRET portonly (TYPE xmla, PORT 2383);
+
+statement error
+SELECT * FROM xmla_discover('host=example.invalid secret=portonly', 'DBSCHEMA_CATALOGS');
+----
+could not resolve the instance address
+
+# A secret's port goes through ParsePort, exactly as a connection string's does.
+# This was a bare static_cast<uint16_t>, so PORT 65538 became port 2 and the
+# connection went somewhere the caller never named.
+statement ok
+CREATE SECRET badport (TYPE xmla, HOST 'example.invalid', PORT 65538);
+
+statement error
+SELECT * FROM xmla_discover('secret=badport', 'DBSCHEMA_CATALOGS');
+----
+port must be a number in 1..65535
+
+# The connection string still wins over the secret, so an out-of-range secret
+# port is not even consulted when one is given explicitly.
+statement error
+SELECT * FROM xmla_discover('port=2383 secret=badport', 'DBSCHEMA_CATALOGS');
+----
+could not resolve the instance address
+
+# The mechanism reaches the credential. This is the field whose merge broke:
+# `mechanism` defaulted to "kerberos" at construction, so "non-empty wins" made
+# the DEFAULT beat the secret and a secret asking for NTLM was ignored.
+statement ok
+CREATE SECRET badmech (TYPE xmla, HOST 'example.invalid', PORT 2383, MECHANISM 'bogus');
+
+statement error
+SELECT * FROM xmla_discover('secret=badmech', 'DBSCHEMA_CATALOGS');
+----
+unknown mechanism
+
+# ... and the connection string still wins over it, which is the other half of
+# that same bug: this must NOT report an unknown mechanism.
+statement error
+SELECT * FROM xmla_discover('mechanism=ntlm secret=badmech', 'DBSCHEMA_CATALOGS');
+----
+could not resolve the instance address
+
+# The SPN override reaches the credential too.
+statement ok
+CREATE SECRET badspn (TYPE xmla, HOST 'example.invalid', PORT 2383, MECHANISM 'ntlm', SPN 'noslash');
+
+statement error
+SELECT * FROM xmla_discover('secret=badspn', 'DBSCHEMA_CATALOGS');
+----
+spn must be of the form
+
+# `user` and `password` have no server-free observable — proving they arrived
+# means watching what the security layer sends — so they are covered by the live
+# probe rather than by a test here that would only assert they are not rejected.

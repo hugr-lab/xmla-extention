@@ -63,16 +63,6 @@ XmlaConnectionParams ParamsFrom(TableFunctionBindInput &input) {
 	return params;
 }
 
-//! Translate the protocol layer's categories into DuckDB exceptions.
-//!
-//! The categories exist so a caller can act without parsing text, and that is
-//! preserved here rather than collapsed: an authorization failure says check the
-//! account's permissions, a connection failure says check host and firewall.
-//! Every message is already scrubbed of identifying tokens before it arrives.
-[[noreturn]] void Rethrow(const xmla::XmlaError &error) {
-	throw IOException("xmla: %s", error.what());
-}
-
 unique_ptr<FunctionData> DiscoverBind(ClientContext &context, TableFunctionBindInput &input,
 									  vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto result = make_uniq<XmlaBindData>();
@@ -100,7 +90,7 @@ unique_ptr<FunctionData> DiscoverBind(ClientContext &context, TableFunctionBindI
 		result->rowset = session->Discover(request_type, restrictions, params.catalog);
 		session->Close();
 	} catch (const xmla::XmlaError &error) {
-		Rethrow(error);
+		RethrowXmlaError(error);
 	}
 
 	DescribeRowset(result->rowset, return_types, names);
@@ -138,7 +128,7 @@ unique_ptr<FunctionData> ExecuteBind(ClientContext &context, TableFunctionBindIn
 		result->rowset = session->Execute(statement, params.catalog);
 		session->Close();
 	} catch (const xmla::XmlaError &error) {
-		Rethrow(error);
+		RethrowXmlaError(error);
 	}
 
 	DescribeRowset(result->rowset, return_types, names);

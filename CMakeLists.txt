@@ -43,9 +43,40 @@ if(PkgConfig_FOUND)
     pkg_check_modules(XMLA_KRB5 QUIET krb5)
     if(XMLA_GSSAPI_FOUND AND XMLA_KRB5_FOUND)
         set(XMLA_GSS_FOUND TRUE)
-        set(XMLA_GSS_LIBRARIES ${XMLA_GSSAPI_LIBRARIES} ${XMLA_KRB5_LIBRARIES})
         set(XMLA_GSS_INCLUDE_DIRS ${XMLA_GSSAPI_INCLUDE_DIRS} ${XMLA_KRB5_INCLUDE_DIRS})
-        link_directories(${XMLA_GSSAPI_LIBRARY_DIRS} ${XMLA_KRB5_LIBRARY_DIRS})
+
+        # ABSOLUTE paths, not `-lname` plus link_directories().
+        #
+        # link_directories() applies to targets created in the SAME directory
+        # scope and below, and the extension's archive is linked into DuckDB's
+        # own targets, which are created in duckdb/'s scope. The -L therefore
+        # never reached the link line: verified on the failing command, which
+        # carried `-lgssapi_krb5 -lkrb5 -lk5crypto -lcom_err` and no -L at all.
+        #
+        # On macOS that is not a missing library, it is the WRONG one. Apple
+        # ships /usr/lib/libgssapi_krb5.dylib as a Heimdal-backed shim, so the
+        # link succeeds at finding it and then fails on exactly the symbols the
+        # keg-only Homebrew krb5 was installed to provide -- gss_wrap_iov,
+        # gss_unwrap_iov, gss_wrap_iov_length, gss_release_iov_buffer and
+        # gss_acquire_cred_with_password. The documented instruction in the
+        # error message below (brew install krb5, then PKG_CONFIG_PATH=...) did
+        # not work as written until this resolved each name to a full path.
+        #
+        # Where pkg-config reports no library directory -- the ordinary Linux
+        # case, where the libraries are on the default search path -- the plain
+        # name is kept and the linker resolves it as before.
+        set(XMLA_GSS_LIBRARIES "")
+        foreach(xmla_gss_lib IN LISTS XMLA_GSSAPI_LIBRARIES XMLA_KRB5_LIBRARIES)
+            find_library(XMLA_GSS_LIB_${xmla_gss_lib}
+                NAMES ${xmla_gss_lib}
+                HINTS ${XMLA_GSSAPI_LIBRARY_DIRS} ${XMLA_KRB5_LIBRARY_DIRS}
+                NO_DEFAULT_PATH)
+            if(XMLA_GSS_LIB_${xmla_gss_lib})
+                list(APPEND XMLA_GSS_LIBRARIES ${XMLA_GSS_LIB_${xmla_gss_lib}})
+            else()
+                list(APPEND XMLA_GSS_LIBRARIES ${xmla_gss_lib})
+            endif()
+        endforeach()
         message(STATUS "xmla: MIT GSSAPI ${XMLA_GSSAPI_VERSION}, krb5 ${XMLA_KRB5_VERSION}")
     endif()
 endif()

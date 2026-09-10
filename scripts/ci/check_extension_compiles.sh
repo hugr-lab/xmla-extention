@@ -38,7 +38,13 @@ CXX="${CXX:-c++}"
 fail=0
 while IFS= read -r f; do
     [ -n "$f" ] || continue
-    if ! "$CXX" -std=c++17 -fsyntax-only -Isrc/include -Iduckdb/src/include "$f"; then
+    # -DXMLA_VERSION and -DDUCKDB_BUILD_LOADABLE_EXTENSION match what the real
+    # build defines (CMakeLists.txt). Without them this checked the OTHER
+    # preprocessor branch: src/xmla_extension.cpp took its `#else`
+    # (DefaultVersion()) path, so a defect in the branch that actually ships was
+    # invisible to the very check meant to catch it.
+    if ! "$CXX" -std=c++17 -fsyntax-only -DXMLA_VERSION='"0.0.0-syntax-check"' \
+        -DDUCKDB_BUILD_LOADABLE_EXTENSION -Isrc/include -Iduckdb/src/include "$f"; then
         echo "extension-compile: $f does not compile against DuckDB's headers" >&2
         fail=1
     fi

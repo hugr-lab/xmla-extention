@@ -17,11 +17,15 @@
 !test
 !tools
 
-# Belt and braces: even if a rule above ever re-admits a parent, these never
-# come in. Constitution I.
-.env
-.env.*
-*.keytab
-*.ccache
-*.pem
-*.key
+# Belt and braces, AT EVERY DEPTH.
+#
+# A bare `.env` matches only the context root: `*` does not cross `/`, and the
+# allowlist above re-admits src, test, scripts and tools wholesale — so a
+# `test/gss/kerberos/.env` or a `scripts/foo.pem` in the working tree would have
+# been copied into the image while this block appeared to prevent it.
+**/.env
+**/.env.*
+**/*.keytab
+**/*.ccache
+**/*.pem
+**/*.key

@@ -6,6 +6,7 @@
 #include "duckdb/parser/parsed_data/drop_info.hpp"
 #include "duckdb/storage/database_size.hpp"
 #include "xmla/errors.hpp"
+#include "xmla_connection.hpp"
 
 namespace duckdb {
 
@@ -72,7 +73,7 @@ void XmlaCatalog::LoadSchemas(ClientContext &context) {
 		catalogs = session->Discover("DBSCHEMA_CATALOGS");
 		session->Close();
 	} catch (const xmla::XmlaError &error) {
-		throw IOException("xmla: %s", error.what());
+		RethrowXmlaError(error);
 	}
 
 	for (const auto &row : catalogs.rows) {

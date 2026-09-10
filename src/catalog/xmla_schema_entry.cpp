@@ -5,6 +5,7 @@
 #include "duckdb/parser/parsed_data/create_table_info.hpp"
 #include "duckdb/parser/parsed_data/drop_info.hpp"
 #include "xmla/errors.hpp"
+#include "xmla_connection.hpp"
 
 namespace duckdb {
 
@@ -83,7 +84,7 @@ void XmlaSchemaEntry::LoadTables(ClientContext &context) {
 		columns = session->Discover("DBSCHEMA_COLUMNS", {}, model);
 		session->Close();
 	} catch (const xmla::XmlaError &error) {
-		throw IOException("xmla: %s", error.what());
+		RethrowXmlaError(error);
 	}
 
 	// Group the columns by table in one pass. DBSCHEMA_COLUMNS is the large

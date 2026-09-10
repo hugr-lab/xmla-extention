@@ -84,8 +84,9 @@ int main(void) {
 		maj = gss_wrap(&min, cctx, 1, GSS_C_QOP_DEFAULT, &in, &conf, &out);
 		if (maj) bail("gss_wrap", maj, min);
 		size_t overhead = out.length - plen;
-		/* Same reasoning as the Kerberos probe: for a 1-byte payload this is a
-		 * 1-in-256 coin flip, not a measurement. Only assert it from 8 bytes up. */
+		/* Same reasoning as the Kerberos probe: at 1 byte this is a 1-in-256 coin
+		 * flip rather than a measurement, so it is asserted from 3 bytes up while
+		 * conf above carries the deterministic answer at every size. */
 		/* conf is gss_wrap's own conf_state — deterministic, size-independent,
 		 * and the actual evidence of confidentiality. */
 		if (!conf) {

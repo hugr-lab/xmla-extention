@@ -8,6 +8,7 @@
 
 #include "duckdb.hpp"
 #include "xmla/client.hpp"
+#include "xmla/errors.hpp"
 #include "xmla/gss_context.hpp"
 
 #include <memory>
@@ -77,5 +78,14 @@ private:
 
 //! Open an authenticated session. The password is read here and dropped here.
 std::unique_ptr<xmla::Session> OpenSession(ClientContext &context, XmlaConnectionParams params);
+
+//! Translate a protocol-layer failure into the DuckDB exception that matches it.
+//!
+//! The protocol layer's categories exist so an operator can act without parsing
+//! message text, and throwing IOException for all of them threw that away: a
+//! wrong password, a refused permission and an unreachable host all arrived as
+//! "IO Error". DuckDB surfaces the exception type in `error_type`, so the
+//! mapping is visible to a caller and not only to a human reading the message.
+[[noreturn]] void RethrowXmlaError(const xmla::XmlaError &error);
 
 }  // namespace duckdb

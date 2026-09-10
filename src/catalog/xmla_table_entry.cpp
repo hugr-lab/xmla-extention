@@ -4,6 +4,7 @@
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/parser/parsed_data/create_table_info.hpp"
 #include "xmla/errors.hpp"
+#include "xmla_connection.hpp"
 
 namespace duckdb {
 
@@ -62,7 +63,7 @@ unique_ptr<GlobalTableFunctionState> ScanInit(ClientContext &context, TableFunct
 		state->rowset = session->Execute("EVALUATE '" + quoted + "'", bind_data.ssas_catalog);
 		session->Close();
 	} catch (const xmla::XmlaError &error) {
-		throw IOException("xmla: %s", error.what());
+		RethrowXmlaError(error);
 	}
 
 	// The probe uses the rowset's COLUMN UNION, never a single row.

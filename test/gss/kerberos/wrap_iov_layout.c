@@ -120,9 +120,9 @@ int main(int argc, char **argv) {
 		 * NOT-ENCRYPTED for aes128-cts-hmac-sha1-96 — an alarm about the
 		 * mechanism caused entirely by the size of the sample.
 		 *
-		 * Only assert it from 8 bytes up, where a coincidence is 2^-64. The small
-		 * sizes still assert length-preservation and the round-trip, which are
-		 * deterministic and are what the frame actually depends on. */
+		 * conf_state above is the deterministic answer at every size. This byte
+		 * comparison is only a cross-check, and only where it means something:
+		 * from 3 bytes up, where a coincidence is 2^-24. */
 		/* conf_state is the mechanism's OWN answer to "did you encrypt?", it is
 		 * deterministic, and it does not care how big the payload is. It was
 		 * being computed and thrown away while a byte-comparison stood in for

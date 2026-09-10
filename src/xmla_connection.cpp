@@ -29,13 +29,39 @@ uint16_t ParsePort(const std::string &value) {
 	return static_cast<uint16_t>(parsed);
 }
 
+//! An UPPER bound as well as a lower one.
+//!
+//! `!(parsed > 0)` alone accepts `inf` — strtod consumes the whole string — and
+//! any finite monster like 1e300. Both reach SocketChannel, where
+//! `static_cast<time_t>(seconds)` and `static_cast<long long>(seconds * 1000)`
+//! are undefined behaviour outside the target's range. A day is far beyond any
+//! legitimate query and comfortably inside every integer type involved.
+static const double kMaxTimeoutSeconds = 86400.0;
+
 double ParseTimeout(const std::string &value) {
 	char *end = nullptr;
 	const double parsed = std::strtod(value.c_str(), &end);
-	if (value.empty() || (end && *end != '\0') || !(parsed > 0)) {
-		throw BinderException("xmla: timeout must be a positive number of seconds");
+	if (value.empty() || (end && *end != '\0') || !(parsed > 0) || !(parsed <= kMaxTimeoutSeconds)) {
+		throw BinderException("xmla: timeout must be a positive number of seconds, at most %.0f", kMaxTimeoutSeconds);
 	}
 	return parsed;
+}
+
+//! Refuse an unrecognised boolean rather than reading it as false.
+//!
+//! `use_port` selects between two different SPNs, so `use_port=yes` or
+//! `use_port=flase` quietly meaning false presents as a Kerberos failure with no
+//! hint at the cause — and it contradicts the stance this file takes ten lines
+//! away for an unknown KEY.
+bool ParseBool(const std::string &key, const std::string &value) {
+	const std::string lowered = LowerAscii(value);
+	if (lowered == "true" || lowered == "1" || lowered == "yes" || lowered == "on") {
+		return true;
+	}
+	if (lowered == "false" || lowered == "0" || lowered == "no" || lowered == "off") {
+		return false;
+	}
+	throw BinderException("xmla: %s must be true or false, not '%s'", key, value);
 }
 
 }  // namespace
@@ -74,7 +100,7 @@ XmlaConnectionParams XmlaConnectionParams::FromString(const std::string &connect
 		} else if (key == "instance") {
 			params.instance = value;
 		} else if (key == "use_port") {
-			params.use_port = (LowerAscii(value) == "true" || value == "1");
+			params.use_port = ParseBool("use_port", value);
 		} else if (key == "timeout") {
 			params.timeout_seconds = ParseTimeout(value);
 		} else if (key == "secret") {
@@ -112,7 +138,22 @@ std::string XmlaConnectionParams::ApplySecret(ClientContext &context) {
 			"(TYPE xmla, MECHANISM 'ntlm', USER '...', PASSWORD '...')",
 			secret_name, secret_name);
 	}
-	const auto &secret = dynamic_cast<const KeyValueSecret &>(*entry->secret);
+	// The TYPE is checked. SecretManager::GetSecretByName does not filter by it,
+	// so `secret=my_s3_creds` was accepted: every TryGetValue missed, and the
+	// connection proceeded with no user, no password and the Kerberos default —
+	// presenting as an authentication failure rather than as the naming mistake
+	// it is.
+	if (entry->secret->GetType() != "xmla") {
+		throw BinderException(
+			"xmla: secret '%s' is of type '%s', not 'xmla'. Create one with: "
+			"CREATE SECRET %s (TYPE xmla, MECHANISM 'ntlm', USER '...', PASSWORD '...')",
+			secret_name, entry->secret->GetType(), secret_name);
+	}
+	const auto *kv = dynamic_cast<const KeyValueSecret *>(entry->secret.get());
+	if (!kv) {
+		throw BinderException("xmla: secret '%s' does not carry key/value fields", secret_name);
+	}
+	const auto &secret = *kv;
 
 	auto take = [&](const char *key, std::string &target) {
 		if (!target.empty()) {
@@ -131,7 +172,11 @@ std::string XmlaConnectionParams::ApplySecret(ClientContext &context) {
 	if (port == 0) {
 		const Value port_value = secret.TryGetValue("port");
 		if (!port_value.IsNull()) {
-			port = static_cast<uint16_t>(port_value.GetValue<int64_t>());
+			// Through ParsePort, NOT a bare static_cast. The cast was exactly the
+			// silent truncation ParsePort exists to prevent: PORT 65538 became 2,
+			// PORT -1 became 65535, and PORT 65536 became 0 — which then surfaced
+			// as "port is required" against a secret that plainly sets one.
+			port = ParsePort(port_value.ToString());
 		}
 	}
 
@@ -195,6 +240,44 @@ std::string XmlaConnectionParams::Resolve(ClientContext &context) {
 	ApplyDefaults();
 	Validate();
 	return password;
+}
+
+[[noreturn]] void RethrowXmlaError(const xmla::XmlaError &error) {
+	// Concatenated, not formatted: a server's own explanation can contain a `%`,
+	// and the variadic Exception constructors treat their first argument as a
+	// format string. The single-argument overloads take the message verbatim.
+	const std::string message = "xmla: " + std::string(error.what());
+
+	// Most derived first. IncompleteMessage derives from ProtocolError, and both
+	// want the same answer here, but ordering by derivation is the habit that
+	// keeps this correct when they stop wanting the same answer.
+	if (dynamic_cast<const xmla::ConnectionError *>(&error)) {
+		// Never reached a server: host, port, firewall.
+		throw ConnectionException(message);
+	}
+	if (dynamic_cast<const xmla::AuthenticationError *>(&error)) {
+		// Reached the server, could not say who we are. That is the credential
+		// or the mechanism — configuration, not I/O.
+		throw InvalidConfigurationException(message);
+	}
+	if (dynamic_cast<const xmla::AuthorizationError *>(&error)) {
+		throw PermissionException(message);
+	}
+	if (dynamic_cast<const xmla::NegotiationError *>(&error)) {
+		// The server refused clear-text XML. This extension does not implement
+		// binary XML or compression, so the honest answer is that what the
+		// server wants is not implemented here — loudly, per the category's own
+		// reason for existing.
+		throw NotImplementedException(message);
+	}
+	if (dynamic_cast<const xmla::ServerError *>(&error)) {
+		// The server understood the request and rejected it, so the request is
+		// what was wrong.
+		throw InvalidInputException(message);
+	}
+	// ProtocolError, IncompleteMessage, and anything added later: the bytes on
+	// the wire were not what the specification requires.
+	throw IOException(message);
 }
 
 std::unique_ptr<xmla::Session> OpenSession(ClientContext &context, XmlaConnectionParams params) {

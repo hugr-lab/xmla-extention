@@ -126,12 +126,11 @@ jobs:
             echo "the probe failed; the etype lines below it come from klist, not from a measurement"
             exit 1
           fi
-          # NOT-ENCRYPTED is only reported for payloads of 8 bytes or more. Below
-          # that a byte-inequality test is a coin flip rather than a measurement:
-          # a 1-byte ciphertext coincides with its plaintext once in 256 runs,
-          # which duly happened here and reported the mechanism broken. Those
-          # rows now read "enc-n/a" and still assert length-preservation and the
-          # round-trip, which are deterministic.
+          # NOT-ENCRYPTED is reported from 3 bytes up. At 1 byte a byte-inequality
+          # test is a coin flip rather than a measurement — the ciphertext
+          # coincides with its plaintext once in 256 runs, which duly happened
+          # here and reported the mechanism broken. That row reads "enc-n/a";
+          # conf_state, asserted below, is the deterministic answer at every size.
           for marker in RT-FAILED LEN-CHANGED NOT-ENCRYPTED; do
             if grep -q "$marker" out.txt; then
               echo "a wrap_iov round-trip reported $marker"; exit 1

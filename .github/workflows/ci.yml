@@ -31,23 +31,14 @@ jobs:
           # CHECKED OUT, not built.
           submodules: recursive
 
+      # Delegates to the script rather than repeating the find expression, the
+      # zero-file guard and the --Werror invocation. They existed in both places,
+      # which defeated the point of extracting the script: a change to the file
+      # set (a fourth directory, a .cc extension) would have applied to one copy
+      # and not the other, and local `make check` and CI would disagree without
+      # either failing.
       - name: clang-format
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y clang-format-14
-          # -print0/-0 for paths with spaces; -r so an empty list does not invoke
-          # clang-format with no arguments, where it reads the already-drained
-          # stdin and exits 0 -- a green lint that checked nothing, which is the
-          # same failure the leak gate and check_layering.sh both refuse.
-          # The count guard is what actually catches a directory rename.
-          count=$(find src test tools \( -name '*.cpp' -o -name '*.hpp' \) -print | grep -c '')
-          echo "formatting $count file(s)"
-          if [ "$count" -eq 0 ]; then
-            echo "found 0 sources to format -- the file list is broken, which is not a pass" >&2
-            exit 1
-          fi
-          find src test tools \( -name '*.cpp' -o -name '*.hpp' \) -print0 \
-            | xargs -0 -r clang-format-14 --dry-run --Werror
+        run: scripts/ci/clang_format.sh --check
 
       # Constitution I. The gate runs on every commit locally; here it runs over
       # EVERY TRACKED FILE, not just a diff, so a token that arrived before the
