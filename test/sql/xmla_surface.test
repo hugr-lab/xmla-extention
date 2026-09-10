@@ -182,9 +182,12 @@ read-only
 # options.access_mode is seeded from DBConfig and only overwritten when the
 # statement carried one of these keys, so a database opened with
 # access_mode=read_write made a plain `ATTACH ... (TYPE xmla)` fail while naming
-# an option the user never wrote. That configuration cannot be reached from SQL
-# — `SET access_mode` is refused after startup — so it is asserted through the C
-# API instead; these two cases pin the half that IS reachable.
+# an option the user never wrote.
+#
+# That configuration cannot be reached from here: `SET access_mode` is refused
+# after startup, so no .test file can produce it. It is covered by
+# test/capi/attach_access_mode.cpp, run by scripts/ci/run_capi_tests.sh in the
+# same CI job as this file. The two cases below pin the half that IS reachable.
 statement ok
 ATTACH 'host=example.invalid port=2383' AS ro5 (TYPE xmla, READ_ONLY true);
 

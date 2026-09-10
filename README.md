@@ -62,6 +62,8 @@ real illustration is a welcome first contribution. Nothing depends on the file.
 |---|---|
 | NTLM, end to end | **works**, verified against SQL Server 2022 on tabular and multidimensional instances |
 | `ATTACH`, `SHOW ALL TABLES`, `DESCRIBE`, `SELECT` | **works** on a tabular model |
+| MDX against a cube, via `xmla_execute` | **works** — the client asks for `Format=Tabular`, so a cellset arrives as rows |
+| `MDSCHEMA_CUBES` / `_MEASURES` / `_DIMENSIONS` / `_HIERARCHIES` / `_LEVELS` | **works** — ordinary table functions, so they join |
 | Projection pushdown | **works** — a narrow `SELECT` sends a DAX `SELECTCOLUMNS` list, not the whole table |
 | `LIMIT` | **works** by stopping the read, not by a DAX clause; DuckDB passes no limit to a scan |
 | Filter pushdown | not done — DAX refuses a text literal against a numeric column, and no non-admin rowset says which columns those are (research D14) |
@@ -139,6 +141,229 @@ The second is a guard, not a proof. **Grant the connecting account read-only per
 the server.** That is the only control that cannot be reasoned around, and no client-side
 check substitutes for it.
 
+## How a scan behaves
+
+A `SELECT` against an attached table **streams**. The protocol layer hands back a cursor
+rather than a whole rowset, so rows are decoded as DIME records arrive and a query that stops
+asking stops the transfer.
+
+- **The projection is pushed down.** A narrow `SELECT` sends a DAX `SELECTCOLUMNS` list, not
+  the whole table. This needs a tabular model at compatibility level 1200 or above (SSAS
+  2016+), so it is used only when it actually narrows the transfer — a `SELECT *` still sends
+  plain `EVALUATE '<table>'`.
+- **`LIMIT` works by stopping the read**, not by a DAX clause. DuckDB passes no limit to a
+  table scan at all, so the scan cannot ask the server for five rows; what it can do is
+  abandon the response, and it does.
+- **The `WHERE` clause is not pushed down**, and that is a measured decision rather than an
+  omission. Every column is currently `VARCHAR`, so a rendered constant is always a DAX
+  *text* literal, and DAX refuses to compare one against a numeric column instead of coercing
+  it: *"DAX comparison operations do not support comparing values of type Integer with values
+  of type Text."* Knowing the real type would settle it and no read-only account can get it —
+  `DBSCHEMA_COLUMNS` reports `DBTYPE_WSTR` for every column of a tabular model, and
+  `TMSCHEMA_COLUMNS` needs administrator rights. A type-agnostic rendering would route the
+  comparison through DAX's own number-to-text formatting, which can silently drop rows DuckDB
+  would keep. See research D14.
+
+Measured on a 60398-row fact table with three columns:
+
+| query | DAX sent | wall clock |
+|---|---|---|
+| all 3 columns, whole table | `EVALUATE 'T'` | 37.07 s |
+| 1 of 3 columns, whole table | `EVALUATE SELECTCOLUMNS(…)` | 2.22 s |
+| all 3 columns, `LIMIT 5` | `EVALUATE 'T'`, abandoned early | 0.27 s |
+
+Columns arrive as `VARCHAR`. The rowset that is supposed to report a column's type reports
+`WSTR` for all of them, so a real type mapping needs a different source (T-041) — and
+guessing a type from a value would not be honest.
+
+## A tabular session, end to end
+
+A real transcript against a live SQL Server 2022 tabular instance. Only the
+host, account and password are replaced; the catalog on this instance is called
+`AWTabular`.
+
+```sql
+CREATE SECRET ssas (TYPE xmla, HOST '<instance>', PORT 2383,
+                    MECHANISM 'ntlm', USER '<user>', PASSWORD '<password>');
+ATTACH 'secret=ssas' AS aw (TYPE xmla);
+```
+
+**`SHOW ALL TABLES`** — the schemas are the instance's models and the tables are
+their tables, so DuckDB's own command answers it. The extension implements
+neither `SHOW ALL TABLES` nor `DESCRIBE`:
+
+```sql
+SHOW ALL TABLES;
+```
+```
+┌──────────┬───────────┬───────────────────┬──────────────────────────────────────────┬─────────────────────────────┬───────────┐
+│ database │  schema   │       name        │               column_names               │        column_types         │ temporary │
+├──────────┼───────────┼───────────────────┼──────────────────────────────────────────┼─────────────────────────────┼───────────┤
+│ aw       │ AWTabular │ DimProduct        │ [ProductKey, EnglishProductName]         │ [VARCHAR, VARCHAR]          │ false     │
+│ aw       │ AWTabular │ FactInternetSales │ [ProductKey, SalesAmount, OrderQuantity] │ [VARCHAR, VARCHAR, VARCHAR] │ false     │
+└──────────┴───────────┴───────────────────┴──────────────────────────────────────────┴─────────────────────────────┴───────────┘
+```
+
+**`DESCRIBE`**:
+
+```sql
+DESCRIBE aw."AWTabular".DimProduct;
+```
+```
+┌────────────────────┬─────────────┬──────┬──────┬─────────┬───────┐
+│    column_name     │ column_type │ null │ key  │ default │ extra │
+├────────────────────┼─────────────┼──────┼──────┼─────────┼───────┤
+│ ProductKey         │ VARCHAR     │ YES  │ NULL │ NULL    │ NULL  │
+│ EnglishProductName │ VARCHAR     │ YES  │ NULL │ NULL    │ NULL  │
+└────────────────────┴─────────────┴──────┴──────┴─────────┴───────┘
+```
+
+**And the point of the whole thing — SSAS joined to local data.** The SSAS side
+is an ordinary scan, so it joins, filters and aggregates like any other table:
+
+```sql
+CREATE TABLE local_notes(k VARCHAR, note VARCHAR);
+INSERT INTO local_notes VALUES ('310','discontinued'),
+                               ('311','review pricing'),
+                               ('312','low stock');
+
+SELECT p.EnglishProductName, local.note
+FROM aw."AWTabular".DimProduct p
+JOIN local_notes local ON p.ProductKey = local.k
+ORDER BY p.EnglishProductName;
+```
+```
+┌────────────────────┬────────────────┐
+│ EnglishProductName │      note      │
+├────────────────────┼────────────────┤
+│ Road-150 Red, 44   │ review pricing │
+│ Road-150 Red, 48   │ low stock      │
+│ Road-150 Red, 62   │ discontinued   │
+└────────────────────┴────────────────┘
+```
+
+That scan sent plain `EVALUATE 'DimProduct'`, because the join needs both of
+that table's two columns and a projection that does not narrow is not sent. Ask
+for one column of a wider table and a `SELECTCOLUMNS` list travels instead; see
+"How a scan behaves".
+
+## A cube session, end to end
+
+Everything below is a real transcript against a live SQL Server 2022
+multidimensional instance. Only the host, account and password are replaced.
+
+```sql
+CREATE SECRET md (TYPE xmla, HOST '<instance>', PORT 2384,
+                  MECHANISM 'ntlm', USER '<user>', PASSWORD '<password>');
+```
+
+**What cubes are there** — `MDSCHEMA_CUBES` is "show all cubes":
+
+```sql
+SELECT CUBE_NAME, CUBE_TYPE, LAST_SCHEMA_UPDATE
+FROM xmla_discover('secret=md', 'MDSCHEMA_CUBES', catalog := 'AWMultidim');
+```
+```
+┌───────────┬───────────┬────────────────────────────┐
+│ CUBE_NAME │ CUBE_TYPE │     LAST_SCHEMA_UPDATE     │
+├───────────┼───────────┼────────────────────────────┤
+│ AWCube    │ CUBE      │ 2026-08-19T18:20:52.233333 │
+└───────────┴───────────┴────────────────────────────┘
+```
+
+**What is in it** — measures, dimensions, and the hierarchy levels joined to
+their hierarchies. These are ordinary table functions, so they join:
+
+```sql
+SELECT MEASURE_NAME, MEASURE_UNIQUE_NAME, MEASUREGROUP_NAME, DATA_TYPE
+FROM xmla_discover('secret=md', 'MDSCHEMA_MEASURES', catalog := 'AWMultidim');
+
+SELECT h.HIERARCHY_UNIQUE_NAME, l.LEVEL_NAME, l.LEVEL_NUMBER, l.LEVEL_CARDINALITY
+FROM xmla_discover('secret=md', 'MDSCHEMA_LEVELS', catalog := 'AWMultidim') l
+JOIN xmla_discover('secret=md', 'MDSCHEMA_HIERARCHIES', catalog := 'AWMultidim') h
+  ON h.HIERARCHY_UNIQUE_NAME = l.HIERARCHY_UNIQUE_NAME
+ORDER BY l.LEVEL_UNIQUE_NAME;
+```
+```
+┌──────────────┬───────────────────────────┬───────────────────┬───────────┐
+│ MEASURE_NAME │    MEASURE_UNIQUE_NAME    │ MEASUREGROUP_NAME │ DATA_TYPE │
+├──────────────┼───────────────────────────┼───────────────────┼───────────┤
+│ Sales Amount │ [Measures].[Sales Amount] │ Internet Sales    │ 6         │
+└──────────────┴───────────────────────────┴───────────────────┴───────────┘
+
+┌─────────────────────────┬───────────────┬──────────────┬───────────────────┐
+│  HIERARCHY_UNIQUE_NAME  │  LEVEL_NAME   │ LEVEL_NUMBER │ LEVEL_CARDINALITY │
+├─────────────────────────┼───────────────┼──────────────┼───────────────────┤
+│ [Measures]              │ MeasuresLevel │ 0            │ 1                 │
+│ [Product].[Product Key] │ (All)         │ 0            │ 1                 │
+│ [Product].[Product Key] │ Product Key   │ 1            │ 607               │
+└─────────────────────────┴───────────────┴──────────────┴───────────────────┘
+```
+
+**Query it with MDX.** `xmla_execute` sends the statement and hands back rows:
+
+```sql
+SELECT * FROM xmla_execute('secret=md',
+  'SELECT {[Measures].[Sales Amount]} ON COLUMNS,
+          TOPCOUNT([Product].[Product Key].[Product Key].MEMBERS, 5,
+                   [Measures].[Sales Amount]) ON ROWS
+   FROM [AWCube]', catalog := 'AWMultidim');
+```
+```
+┌────────────────────────────────────────────────────────┬───────────────────────────┐
+│ [Product].[Product Key].[Product Key].[MEMBER_CAPTION] │ [Measures].[Sales Amount] │
+├────────────────────────────────────────────────────────┼───────────────────────────┤
+│ Road-150 Red, 48                                       │ 1205876.99                │
+│ Road-150 Red, 62                                       │ 1202298.72                │
+│ Road-150 Red, 52                                       │ 1080637.54                │
+│ Road-150 Red, 56                                       │ 1055589.65                │
+│ Road-150 Red, 44                                       │ 1005493.87                │
+└────────────────────────────────────────────────────────┴───────────────────────────┘
+```
+
+A cellset has axes and cells, not rows, so the client asks for
+`Format=Tabular` and the server flattens it. Without that property an MDX query
+returned **zero rows and no error** — see "Reading the output" below.
+
+**`SELECT` on a cube is refused, and says what to use instead.** A
+multidimensional model has no DAX, so its tables list but cannot be scanned:
+
+```sql
+ATTACH 'secret=md catalog=AWMultidim' AS cube (TYPE xmla);
+SELECT * FROM cube.AWMultidim.Product LIMIT 3;
+-- Not implemented Error: xmla: 'Product' is in a multidimensional model, whose
+-- rows cannot be read as a table. Multidimensional data is queried with MDX —
+-- use xmla_execute() — while a tabular model's tables support SELECT directly.
+```
+
+`SHOW ALL TABLES` still lists it with its columns, because that needs no scan.
+`DESCRIBE` does not, because DuckDB binds a scan to answer it.
+
+### Reading the output
+
+Two things are worth knowing before you build on this, because both are the
+server's shape rather than a choice made here.
+
+**MDX result columns keep their MDX unique names.** `[Product].[Product Key].[Product Key].[MEMBER_CAPTION]`
+is what the flattened cellset calls that column, and renaming it would mean
+guessing which part the caller wanted. Alias it in SQL if you want something
+shorter:
+
+```sql
+SELECT "[Product].[Product Key].[Product Key].[MEMBER_CAPTION]" AS product,
+       "[Measures].[Sales Amount]"                             AS sales
+FROM xmla_execute(...);
+```
+
+**Some metadata columns are raw OLE DB codes.** `DATA_TYPE` is `6` for that
+measure (currency), and `DIMENSION_TYPE` is `2` for `[Measures]` and `3` for
+`[Product]`. They are passed through as the server sent them: decoding them
+means shipping a table of enumeration values, and this project does not state a
+protocol claim it has not verified. `CUBE_TYPE` arrives as text (`CUBE`)
+because the server sends it that way.
+
+Everything arrives as `VARCHAR` — see "How a scan behaves".
+
 ## Nothing identifying gets committed
 
 Hostnames, addresses, account names, realms, SPNs, machine names and security identifiers are
@@ -169,6 +394,38 @@ make check
 `make fmt` reformats with the **same clang-format CI pins** (14, via a
 container). Newer versions disagree with it, so formatting with whatever is on
 your machine can produce a diff that only fails once pushed.
+
+## Testing on Linux, from any host
+
+`make check` runs everything that does not need a server or a security library. The rest —
+the SQL surface, and anything against a live instance — has to run on **Linux**: the NTLM
+path needs `gss-ntlmssp`, which macOS does not ship, and a macOS build links keg-only
+Homebrew krb5 and is not the artifact anyone ships.
+
+```bash
+./scripts/run-sql-tests.sh
+```
+
+That builds the extension and runs the hermetic suite plus every `test/sql/*.test` inside a
+container — Apple's `container` runtime on macOS, Docker elsewhere. The repository is
+bind-mounted rather than copied and the build tree is kept in `build/container`, so the first
+run takes tens of minutes and every run after it is incremental.
+
+Set `XMLA_HOST` and it also attaches a live instance and reports what it can see. Add
+`XMLA_TABLE` and it runs the scan checks that nothing server-free can reach — the projection
+pushdown, `count(*)`, the early-abandoned `LIMIT`, and the DDL refusal:
+
+```bash
+export XMLA_HOST=<address of your instance>
+export XMLA_USER='<principal>' XMLA_PASSWORD='<password>'
+export XMLA_CATALOG='<model>'
+export XMLA_TABLE='"<model>"."<table>"'
+
+./scripts/run-sql-tests.sh
+```
+
+The password is written to a 0600 file the runtime reads, never to the command line: `-e
+KEY=VALUE` puts the value in the runtime's ARGV, and `/proc/<pid>/cmdline` is world-readable.
 
 ## Running the probe against a live instance
 
@@ -202,8 +459,9 @@ prints as `<HOST>\TAB`.
 
 ### Notes on Apple `container`
 
-The script deals with two traps so you do not have to, but they are worth knowing
-because they bite everything else on the machine too.
+Both container scripts share this logic (`scripts/lib/container_runtime.sh`). They deal with
+two traps so you do not have to, but the traps are worth knowing because they bite everything
+else on the machine too.
 
 **It picks the signed binary, not the one on `PATH`.** Apple's `container`
 network plugin needs `com.apple.security.virtualization`, a *restricted*

@@ -403,3 +403,209 @@ TEST_CASE("a response that does not decrypt to XML is refused, streaming too") {
 	std::vector<Cell> row;
 	REQUIRE_THROWS_EXACTLY(ProtocolError, cursor->Next(row));
 }
+
+TEST_CASE("an EMPTY unsealed response is refused, not reported as zero rows") {
+	// The one case the "not xml at all" case above does not reach. CheckHead
+	// returned immediately while head_ was empty, so a response whose plaintext
+	// is empty — a zero-length reply, or frames that unseal to nothing — set
+	// complete_ with the guard never having run: Next() reported drained and a
+	// scan produced zero rows with no error. This layer documents an empty
+	// rowset as a MEANINGFUL answer, so a framing or decrypt failure then
+	// presents as "the table is empty".
+	FakeSealProvider server_side(16, 512);
+	auto chan = AuthenticatedChannel(server_side, "", 0, 0);
+
+	Session session(Target(), Credential());
+	session.Open(chan, std::unique_ptr<GssContext>(new FakeGssContext(1, 16, 512)));
+
+	auto cursor = session.ExecuteCursor("EVALUATE 'T'");
+	std::vector<Cell> row;
+	REQUIRE_THROWS_EXACTLY(ProtocolError, cursor->Next(row));
+	// The whole-message path rejects the identical bytes, which is the point:
+	// the two must not disagree about what an empty response means.
+	auto chan2 = AuthenticatedChannel(server_side, "", 0, 0);
+	Session whole(Target(), Credential());
+	whole.Open(chan2, std::unique_ptr<GssContext>(new FakeGssContext(1, 16, 512)));
+	REQUIRE_THROWS_EXACTLY(ProtocolError, whole.Execute("EVALUATE 'T'"));
+}
+
+TEST_CASE("a response that never completes a row is bounded, and says so") {
+	// MessageStream caps what IT buffers, but that cap became per-record once
+	// records were consumed one at a time, and the plaintext accumulates in the
+	// parser instead. A peer streaming records that form no complete row grew
+	// memory without limit.
+	std::string endless = "<root><row><A>";
+	endless.append(200000, 'x');
+	FakeSealProvider server_side(16, 512);
+	auto chan = AuthenticatedChannel(server_side, endless, 4096, 0);
+
+	Session session(Target(), Credential());
+	session.Open(chan, std::unique_ptr<GssContext>(new FakeGssContext(1, 16, 512)));
+
+	// A small limit, for the same reason MessageStream's is overridable: a test
+	// that had to push 16 MiB through the fake provider to reach the real one
+	// would not be written, and an untested cap is not a cap.
+	auto cursor = session.ExecuteCursor("EVALUATE 'T'", std::string(), 32 * 1024);
+	std::vector<Cell> row;
+	REQUIRE_THROWS_EXACTLY(ProtocolError, cursor->Next(row));
+}
+
+TEST_CASE("a cursor destroyed after its session was closed does not crash") {
+	// The destructor dereferenced session_.stream_ unconditionally, and
+	// Session::Close() resets it — as does Session's destructor, which calls
+	// Close(). The scan gets the order right by member declaration order and by
+	// resetting the cursor first, both load-bearing and unenforced on what is
+	// now public protocol-layer API.
+	FakeSealProvider server_side(16, 512);
+	auto chan = AuthenticatedChannel(server_side, EvaluateDocument(50), 200, 0);
+
+	Session session(Target(), Credential());
+	session.Open(chan, std::unique_ptr<GssContext>(new FakeGssContext(1, 16, 512)));
+	{
+		auto cursor = session.ExecuteCursor("EVALUATE 'T'");
+		std::vector<Cell> row;
+		REQUIRE(cursor->Next(row));
+		REQUIRE(!cursor->complete());
+		// Out of order on purpose: the cursor is still alive.
+		session.Close();
+
+		// And it is still USED, which is the reachable crash the destructor
+		// guard did not cover. Close() resets seal_ as well as stream_, and the
+		// unsealer holds a SealProvider REFERENCE — so this was a null deref if
+		// it had to read, and a use-after-free if it got past that. Which one a
+		// mis-ordered caller hit depended on whether rows happened to be
+		// buffered, so the failure was not even deterministic.
+		std::vector<Cell> more;
+		REQUIRE_THROWS_EXACTLY(ConnectionError, [&]() {
+			while (cursor->Next(more)) {
+			}
+		}());
+	}
+	REQUIRE(session.state() == State::CLOSED);
+}
+
+TEST_CASE("the streaming cap accepts what the whole-message path accepts") {
+	// A record larger than the cap, or a single legitimate row larger than it,
+	// used to be refused by the scan while Session::Execute accepted it — with
+	// a message blaming an unterminated document. The two paths must agree, so
+	// the cap is the transport's own, and it is measured on what the parser
+	// RETAINS rather than on that plus a whole freshly-appended record.
+	std::string wide = "<root><row><A>";
+	wide.append(300000, 'x');
+	wide += "</A></row></root>";
+
+	FakeSealProvider server_side(16, 512);
+	auto chan = AuthenticatedChannel(server_side, wide, 0, 0);
+	Session session(Target(), Credential());
+	session.Open(chan, std::unique_ptr<GssContext>(new FakeGssContext(1, 16, 512)));
+
+	// One record carrying the whole 300 KB document, against a 256 KiB cap: the
+	// row is complete, so retaining it briefly is not a violation.
+	auto cursor = session.ExecuteCursor("EVALUATE 'T'", std::string(), 256 * 1024);
+	std::vector<Cell> row;
+	REQUIRE(cursor->Next(row));
+	REQUIRE_EQ(row.size(), 1u);
+	REQUIRE_EQ(row[0].value.size(), 300000u);
+	REQUIRE(!cursor->Next(row));
+}
+
+TEST_CASE("a cellset is refused, not reported as an empty rowset") {
+	// The other half of the Format=Tabular fix. If a server ignores the
+	// property, the response is an <mddataset> with no <row> in it, and this
+	// scanner would report zero rows — indistinguishable from "the cube is
+	// empty", which is a meaningful answer here.
+	const char *cellset =
+		"<Envelope><Body><ExecuteResponse><return>"
+		"<root xmlns=\"urn:schemas-microsoft-com:xml-analysis:mddataset\">"
+		"<Axes><Axis name=\"Axis0\"><Tuples><Tuple><Member><UName>[Measures].[X]</UName></Member></Tuple>"
+		"</Tuples></Axis></Axes><CellData><Cell CellOrdinal=\"0\"><Value>42</Value></Cell></CellData>"
+		"</root></return></ExecuteResponse></Body></Envelope>";
+	FakeSealProvider server_side(16, 512);
+	auto chan = std::make_shared<BytesChannel>();
+	chan->Queue(PlainResponseWire(kAuthResponse, 0));
+	chan->Queue(SealedResponseWire(server_side, cellset, 0));
+
+	Session session(Target(), Credential());
+	session.Open(chan, std::unique_ptr<GssContext>(new FakeGssContext(1, 16, 512)));
+	REQUIRE_THROWS_EXACTLY(ProtocolError, session.Execute("SELECT {[Measures].[X]} ON COLUMNS FROM [C]"));
+}
+
+TEST_CASE("a genuinely empty ROWSET is still zero rows, not an error") {
+	// The guard above must not have turned "no rows visible to this account"
+	// into a failure. That distinction is the reason the guard is narrow.
+	const char *empty =
+		"<Envelope><Body><ExecuteResponse><return>"
+		"<root xmlns=\"urn:schemas-microsoft-com:xml-analysis:rowset\"></root>"
+		"</return></ExecuteResponse></Body></Envelope>";
+	FakeSealProvider server_side(16, 512);
+	auto chan = std::make_shared<BytesChannel>();
+	chan->Queue(PlainResponseWire(kAuthResponse, 0));
+	chan->Queue(SealedResponseWire(server_side, empty, 0));
+
+	Session session(Target(), Credential());
+	session.Open(chan, std::unique_ptr<GssContext>(new FakeGssContext(1, 16, 512)));
+	const Rowset rs = session.Execute("EVALUATE T");
+	REQUIRE(rs.empty());
+	REQUIRE_EQ(rs.size(), 0u);
+}
+
+TEST_CASE("a cellset written with EMPTY elements is still refused") {
+	// FindElementText skips self-closing tags, because it wants an element's
+	// text — so a detector built on it was blind to <CellData/>. That is not a
+	// hypothetical shape: in an mddataset a null cell is OMITTED, so a query
+	// whose cells are all null legitimately has an empty CellData, and a
+	// serializer may write it short. HasElement does not skip it.
+	const char *cellset =
+		"<Envelope><Body><ExecuteResponse><return>"
+		"<root xmlns=\"urn:schemas-microsoft-com:xml-analysis:mddataset\">"
+		"<OlapInfo/><Axes/><CellData/>"
+		"</root></return></ExecuteResponse></Body></Envelope>";
+	FakeSealProvider server_side(16, 512);
+	auto chan = std::make_shared<BytesChannel>();
+	chan->Queue(PlainResponseWire(kAuthResponse, 0));
+	chan->Queue(SealedResponseWire(server_side, cellset, 0));
+
+	Session session(Target(), Credential());
+	session.Open(chan, std::unique_ptr<GssContext>(new FakeGssContext(1, 16, 512)));
+	REQUIRE_THROWS_EXACTLY(ProtocolError, session.Execute("SELECT {[Measures].[X]} ON COLUMNS FROM [C]"));
+}
+
+TEST_CASE("the CURSOR path refuses a cellset too, not just the whole-message one") {
+	// The guard went into RoundtripRowset only, so the two paths disagreed about
+	// one response: Execute threw and ExecuteCursor reported drained with zero
+	// rows. The extension drives the cursor with DAX today, but ExecuteCursor is
+	// public API and RejectIfMutating accepts SELECT, so MDX through it is a
+	// supported call that still had the pre-fix behaviour.
+	const char *cellset =
+		"<Envelope><Body><ExecuteResponse><return>"
+		"<root xmlns=\"urn:schemas-microsoft-com:xml-analysis:mddataset\">"
+		"<OlapInfo/><Axes><Axis name=\"Axis0\"><Tuples/></Axis></Axes>"
+		"<CellData><Cell CellOrdinal=\"0\"><Value>42</Value></Cell></CellData>"
+		"</root></return></ExecuteResponse></Body></Envelope>";
+	FakeSealProvider server_side(16, 512);
+	auto chan = std::make_shared<BytesChannel>();
+	chan->Queue(PlainResponseWire(kAuthResponse, 0));
+	chan->Queue(SealedResponseWire(server_side, cellset, 200));
+
+	Session session(Target(), Credential());
+	session.Open(chan, std::unique_ptr<GssContext>(new FakeGssContext(1, 16, 512)));
+	auto cursor = session.ExecuteCursor("SELECT {[Measures].[X]} ON COLUMNS FROM [C]");
+	std::vector<Cell> row;
+	REQUIRE_THROWS_EXACTLY(ProtocolError, cursor->Next(row));
+}
+
+TEST_CASE("a rowset that HAS rows is never mistaken for a cellset") {
+	// The guard is narrow on purpose: it only fires when no row was produced.
+	// A response carrying rows must reach the caller whatever else is in it.
+	FakeSealProvider server_side(16, 512);
+	auto chan = AuthenticatedChannel(server_side, EvaluateDocument(3), 0, 0);
+	Session session(Target(), Credential());
+	session.Open(chan, std::unique_ptr<GssContext>(new FakeGssContext(1, 16, 512)));
+	auto cursor = session.ExecuteCursor("EVALUATE 'T'");
+	std::vector<Cell> row;
+	int seen = 0;
+	while (cursor->Next(row)) {
+		seen++;
+	}
+	REQUIRE_EQ(seen, 3);
+}

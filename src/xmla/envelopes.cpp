@@ -300,9 +300,22 @@ void RejectIfMutating(const std::string &statement) {
 
 std::string Execute(const std::string &statement, const std::string &catalog, const std::string &session_id) {
 	RejectIfMutating(statement);
+	// Format=Tabular, and it is not optional.
+	//
+	// The default for Execute is Multidimensional, under which an MDX query
+	// returns an <mddataset> — axes and cells — and not a rowset. This scanner
+	// reads rows, so it found none and reported an EMPTY RESULT: measured
+	// against a live multidimensional cube, `SELECT {[Measures].[Sales Amount]}
+	// ON COLUMNS FROM [AWCube]` came back as zero rows with no error. An empty
+	// rowset is a meaningful answer in this layer ("no rows visible to this
+	// account"), so every MDX query silently looked like an empty cube.
+	//
+	// Tabular flattens the cellset into a rowset, which is the shape this client
+	// reads and the shape a SQL caller wants. DAX (EVALUATE) is unaffected: its
+	// result is already tabular.
 	return std::string("<Envelope xmlns=\"") + SOAP_NS + "\">" + SessionHeader(session_id) + "<Body><Execute xmlns=\"" +
 		   XMLA_NS + "\"><Command><Statement>" + XmlEscape(statement) +
-		   "</Statement></Command><Properties><PropertyList>" + Properties(catalog) +
+		   "</Statement></Command><Properties><PropertyList><Format>Tabular</Format>" + Properties(catalog) +
 		   "</PropertyList></Properties></Execute></Body></Envelope>";
 }
 

@@ -63,6 +63,40 @@ class Session;
 //! read off the socket and there is no way back to a record boundary.
 class RowCursor {
 public:
+	//! Ceiling on what the parser may hold without producing a row.
+	//!
+	//! MessageStream caps the bytes it buffers, but that cap became PER RECORD
+	//! once records were consumed one at a time — so a peer streaming records
+	//! that form no complete row grew the parser without limit. This is the
+	//! missing cap.
+	//!
+	//! It is the SAME value as MessageStream's, deliberately. A smaller one
+	//! made the two read paths disagree about the same response: a record
+	//! larger than the limit — the server's choice, bounded only by the
+	//! transport — or a single legitimate row larger than it, since every
+	//! column is VARCHAR and text has no bound, was accepted by
+	//! Session::Execute and refused by the scan, with a message blaming an
+	//! unterminated document. Whatever the whole-message path accepts, this
+	//! one accepts.
+	//!
+	//! The 16 MiB value it replaced had a real CPU argument behind it, and this
+	//! trades it away knowingly. NextTag resumes AT the '<' of an unterminated
+	//! comment, CDATA, PI or doctype, so each pump re-searches the pending
+	//! region for the terminator: the work to reach the cap is quadratic in the
+	//! limit, and 4x the bound is ~16x the scan work. (The review that raised
+	//! this said 16x the bound and ~256x the work; 16 MiB to 64 MiB is 4x.)
+	//! What bounds it is that the cap fires at all, and the threat model: this
+	//! is POST-AUTHENTICATION, so the peer is the instance the operator chose
+	//! to connect to, and the cost is a few seconds of scanning ending in a
+	//! ProtocolError. Persisting the terminator-search offset would make it
+	//! linear and is the fix if that ever stops being an acceptable trade; it
+	//! was declined because it adds resumable state to a fuzz-target scanner
+	//! for a hostile-only cost.
+	//!
+	//! Overridable for the same reason MessageStream's is: a test that had to
+	//! push 64 MiB through the fake provider to reach it would not be written.
+	static const size_t DEFAULT_PARSER_LIMIT = MessageStream::DEFAULT_MAX_BUFFER;
+
 	~RowCursor();
 	RowCursor(const RowCursor &) = delete;
 	RowCursor &operator=(const RowCursor &) = delete;
@@ -87,7 +121,7 @@ public:
 
 private:
 	friend class Session;
-	explicit RowCursor(Session &session);
+	RowCursor(Session &session, size_t parser_limit);
 
 	//! Read one DIME record, unseal it, and feed the parser.
 	void Pump();
@@ -103,9 +137,13 @@ private:
 	//! because it exists to inspect a header and not to buffer a rowset.
 	std::string head_;
 	static const size_t HEAD_LIMIT = 64 * 1024;
+	size_t parser_limit_;
+
 	bool head_checked_ = false;
 	bool complete_ = false;
 	bool drained_ = false;
+	//! Whether any row has been handed out. A cellset produces none.
+	bool emitted_ = false;
 };
 
 //! An authenticated conversation with an instance.
@@ -155,7 +193,8 @@ public:
 	//! Same read-only validation as Execute - the guard is on the statement, so
 	//! it does not care how the answer is read. The returned cursor borrows this
 	//! session; destroy it first.
-	std::unique_ptr<RowCursor> ExecuteCursor(const std::string &statement, const std::string &catalog = std::string());
+	std::unique_ptr<RowCursor> ExecuteCursor(const std::string &statement, const std::string &catalog = std::string(),
+											 size_t parser_limit = RowCursor::DEFAULT_PARSER_LIMIT);
 
 	State state() const {
 		return state_;

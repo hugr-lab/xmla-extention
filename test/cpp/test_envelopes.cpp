@@ -249,3 +249,19 @@ TEST_CASE("the refusal does not echo the statement back") {
 	}
 	REQUIRE(threw);
 }
+
+TEST_CASE("Execute asks for Format=Tabular") {
+	// Not cosmetic. The default for Execute is Multidimensional, under which an
+	// MDX query returns an <mddataset> — axes and cells — and this client reads
+	// rows. Measured against a live multidimensional cube before the property
+	// was sent: `SELECT {[Measures].[Sales Amount]} ON COLUMNS FROM [AWCube]`
+	// came back as ZERO ROWS with no error, and an empty rowset is a meaningful
+	// answer in this layer, so every MDX query looked like an empty cube.
+	const std::string sql = envelopes::Execute("SELECT {[Measures].[X]} ON COLUMNS FROM [C]", "AWMultidim", "");
+	REQUIRE(sql.find("<Format>Tabular</Format>") != std::string::npos);
+	// Inside the property list, and before the catalog, where a property goes.
+	REQUIRE(sql.find("<Format>Tabular</Format>") > sql.find("<PropertyList>"));
+	REQUIRE(sql.find("<Format>Tabular</Format>") < sql.find("</PropertyList>"));
+	// DAX takes the same path and is unaffected: its result is already tabular.
+	REQUIRE(envelopes::Execute("EVALUATE T", "", "").find("<Format>Tabular</Format>") != std::string::npos);
+}

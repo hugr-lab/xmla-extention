@@ -140,6 +140,10 @@ jobs:
       # OOM-killed on a standard runner at full width.
       - run: GEN=ninja CMAKE_BUILD_PARALLEL_LEVEL=2 make release
       - run: ./build/release/test/unittest "test/sql/*"
+      # The checks sqllogictest cannot express. `access_mode` is startup-only,
+      # so no .test file can produce the session configuration that once made a
+      # plain ATTACH fail. This job already has the build, so it costs a compile.
+      - run: ./scripts/ci/run_capi_tests.sh
 
   sanitizers:
     name: ASan + UBSan

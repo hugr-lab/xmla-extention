@@ -12,6 +12,11 @@ namespace xmla {
 
 namespace {
 
+//! Said in ONE place, because both read paths raise it and they must not drift.
+const char *const kCellsetMessage =
+	"the server returned a multidimensional cellset rather than a rowset; "
+	"this client reads rows and asked for Format=Tabular";
+
 //! Fault text that means "you are known but not permitted", as opposed to "the
 //! request was bad". Keeps AuthorizationError distinct from ServerError.
 const char *const kDeniedMarkers[] = {"does not have access", "permission", "not authorized", "access is denied"};
@@ -34,6 +39,19 @@ std::string ToLower(const std::string &in) {
 //! Deliberately not a parse: a SOAP fault is also a valid envelope and is
 //! handled a step earlier, so this only has to separate "an XML document from
 //! the server" from "plaintext that did not decrypt".
+//! Whether a response is a multidimensional cellset rather than a rowset.
+//!
+//! Detected by the cellset's own ELEMENTS, not by the string "mddataset" —
+//! that is the namespace URI on <root>, so matching it as an element name finds
+//! nothing. The XMLA MDDataSet schema puts OlapInfo, Axes and CellData under
+//! that root; Axes and CellData are the two that cannot plausibly appear in a
+//! rowset. HasElement, not FindElementText: FindElementText wants an element's
+//! TEXT and so skips self-closing tags, and a cellset whose cells are all null
+//! has an empty CellData that a serializer may write as <CellData/>.
+bool LooksLikeCellset(const std::string &text) {
+	return HasElement(text, "CellData") || HasElement(text, "Axes");
+}
+
 bool LooksLikeXmla(const std::string &text) {
 	size_t i = 0;
 	// Skip a BOM the sealing layer did not strip, plus leading whitespace.
@@ -186,7 +204,22 @@ Rowset Session::RoundtripRowset(const std::string &payload) {
 			"the unsealed response is not an XMLA envelope; the security "
 			"context or the frame layout is wrong");
 	}
-	return ParseRowset(text);
+
+	Rowset rows = ParseRowset(text);
+
+	// A cellset is not a rowset, and must not arrive looking like an empty one.
+	//
+	// Execute asks for Format=Tabular precisely so that an MDX query comes back
+	// as rows. Before it did, the server returned an <mddataset> — axes and
+	// cells — this scanner found no <row> in it, and every MDX query reported
+	// ZERO ROWS with no error. An empty rowset is a meaningful answer here, so
+	// there was nothing to distinguish "the cube is empty" from "the client
+	// cannot read this shape". If a server ever ignores the property, this says
+	// so instead.
+	if (rows.empty() && LooksLikeCellset(text)) {
+		throw ProtocolError(kCellsetMessage);
+	}
+	return rows;
 }
 
 void Session::CaptureSessionId(const std::string &text) {
@@ -242,14 +275,15 @@ void Session::SendRequest(const std::string &payload) {
 	stream_->SendMessage(sealing::SealMessage(*seal_, body), dime::OptionsNegotiated());
 }
 
-std::unique_ptr<RowCursor> Session::ExecuteCursor(const std::string &statement, const std::string &catalog) {
+std::unique_ptr<RowCursor> Session::ExecuteCursor(const std::string &statement, const std::string &catalog,
+												  size_t parser_limit) {
 	RequireAuthenticated();
 	SendRequest(envelopes::Execute(statement, catalog, session_id_));
 	// Not make_unique: the constructor is private and Session is its friend.
-	return std::unique_ptr<RowCursor>(new RowCursor(*this));
+	return std::unique_ptr<RowCursor>(new RowCursor(*this, parser_limit));
 }
 
-RowCursor::RowCursor(Session &session) : session_(session) {
+RowCursor::RowCursor(Session &session, size_t parser_limit) : session_(session), parser_limit_(parser_limit) {
 	unsealer_.reset(new sealing::Unsealer(*session.seal_));
 }
 
@@ -261,8 +295,20 @@ RowCursor::~RowCursor() {
 	// records are NOT read: reading them would transfer exactly the bytes this
 	// exists to avoid. That leaves the socket mid-message, so the session is
 	// marked failed and the connection is not reused.
-	session_.stream_->AbandonMessage();
-	session_.state_ = State::FAILED;
+	//
+	// Guarded, because Session::Close() resets stream_ and Session's destructor
+	// calls Close(): a cursor destroyed after its session was closed dereferenced
+	// null. The scan gets the order right by member declaration order and by
+	// resetting the cursor before closing, but both are load-bearing and
+	// unenforced on what is now public protocol-layer API, so a mis-ordered
+	// teardown degrades to a leaked response rather than a crash.
+	if (session_.stream_) {
+		session_.stream_->AbandonMessage();
+		// FAILED only when there was something to abandon. A session already
+		// closed is CLOSED, and overwriting that with FAILED would report a
+		// fault where there was an orderly shutdown.
+		session_.state_ = State::FAILED;
+	}
 }
 
 const std::vector<std::string> &RowCursor::columns() const {
@@ -270,7 +316,15 @@ const std::vector<std::string> &RowCursor::columns() const {
 }
 
 void RowCursor::CheckHead() {
-	if (head_.empty()) {
+	// Only while the response is still ARRIVING. An unconditional early return
+	// here meant a response whose plaintext is empty — a zero-length reply, or
+	// frames that unseal to nothing — reached complete_ with the guard never
+	// having run: Next() reported drained and the scan produced zero rows with
+	// no error. This layer documents an empty rowset as a MEANINGFUL answer, so
+	// a framing or decrypt failure then presents as "the table is empty", which
+	// is the indistinguishable emptiness the guard exists to prevent. The
+	// whole-message path rejects the same bytes.
+	if (head_.empty() && !complete_) {
 		return;
 	}
 	// An empty rowset is a MEANINGFUL answer - "no rows visible to this account"
@@ -302,6 +356,9 @@ void RowCursor::CheckHead() {
 	session_.RaiseForFault(head_, /*during_authentication=*/false);
 }
 
+const size_t RowCursor::DEFAULT_PARSER_LIMIT;
+const size_t RowCursor::HEAD_LIMIT;
+
 void RowCursor::Feed(const Bytes &plain) {
 	if (plain.empty()) {
 		return;
@@ -316,6 +373,25 @@ void RowCursor::Feed(const Bytes &plain) {
 }
 
 void RowCursor::Pump() {
+	// The session must still be open. Close() resets BOTH stream_ and seal_, and
+	// the unsealer holds a SealProvider REFERENCE — so pumping after a close was
+	// a null dereference at best and a use-after-free at worst. The destructor
+	// was guarded for this and the live path was not; which of the two a
+	// mis-ordered caller hit depended on whether rows happened to be buffered.
+	if (!session_.stream_ || !session_.seal_) {
+		throw ConnectionError("the session was closed while the response was still being read");
+	}
+	// The cap that MessageStream's stopped being once records are consumed one
+	// at a time. Checked HERE, before the read, rather than after appending a
+	// record: entering Pump the parser has just compacted (the Next() that sent
+	// us here did it), so this measures exactly what the parser retains. After
+	// the append it measured "retained plus one whole record", which is not the
+	// quantity the limit is chosen for.
+	if (parser_.buffered() > parser_limit_) {
+		throw ProtocolError("buffered " + std::to_string(parser_.buffered()) +
+							" bytes of response without a complete row (limit " + std::to_string(parser_limit_) +
+							"); the document is unterminated or the stream is desynchronised");
+	}
 	Bytes record;
 	bool more = true;
 	session_.stream_->ReceiveRecord(record, more);
@@ -335,10 +411,24 @@ bool RowCursor::Next(std::vector<Cell> &out) {
 	}
 	for (;;) {
 		if (parser_.Next(out)) {
+			emitted_ = true;
 			return true;
 		}
 		if (complete_) {
-			// The parser has seen the whole document and has no further row.
+			// The parser has seen the whole document and has no further row —
+			// which is where the SAME cellset check the whole-message path makes
+			// belongs. Without it the two paths disagreed about one response:
+			// RoundtripRowset threw and the cursor reported drained with zero
+			// rows. The extension only drives the cursor with DAX today, but
+			// ExecuteCursor is public protocol-layer API and RejectIfMutating
+			// accepts SELECT, so MDX through it is a supported call — and it had
+			// the pre-fix behaviour intact.
+			//
+			// The prefix suffices: a cellset's OlapInfo and Axes are at the
+			// start of the document, well inside HEAD_LIMIT.
+			if (!emitted_ && LooksLikeCellset(head_)) {
+				throw ProtocolError(kCellsetMessage);
+			}
 			drained_ = true;
 			return false;
 		}

@@ -138,6 +138,7 @@ endif()
 # =============================================================================
 set(XMLA_PROTOCOL_SOURCES
     src/xmla/connection_string.cpp
+    src/xmla/dax.cpp
     src/xmla/dime.cpp
     src/xmla/transport.cpp
     src/xmla/sealing.cpp
