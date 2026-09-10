@@ -115,9 +115,26 @@ void XmlaCatalog::DropSchema(ClientContext &, DropInfo &) {
 
 void XmlaCatalog::ScanSchemas(ClientContext &context, std::function<void(SchemaCatalogEntry &)> callback) {
 	LoadSchemas(context);
-	std::lock_guard<std::mutex> guard(load_lock_);
-	for (auto &entry : schemas_) {
-		callback(entry.second->Cast<SchemaCatalogEntry>());
+
+	// Snapshot under the lock, then RELEASE it before calling back.
+	//
+	// The callback for SHOW ALL TABLES goes on to XmlaSchemaEntry::LoadTables,
+	// which opens a session and issues two DISCOVER round trips — so holding
+	// this catalog-wide mutex across it serialised unrelated concurrent queries
+	// on the same attachment for the duration of every model's metadata fetch.
+	// Worse, load_lock_ is a plain std::mutex, so any callback path that
+	// re-entered LookupSchema or ScanSchemas would be undefined behaviour rather
+	// than a recursive acquire. The entries outlive the lock: they are owned by
+	// schemas_ and never erased.
+	vector<reference<SchemaCatalogEntry>> snapshot;
+	{
+		std::lock_guard<std::mutex> guard(load_lock_);
+		for (auto &entry : schemas_) {
+			snapshot.push_back(entry.second->Cast<SchemaCatalogEntry>());
+		}
+	}
+	for (auto &schema : snapshot) {
+		callback(schema.get());
 	}
 }
 

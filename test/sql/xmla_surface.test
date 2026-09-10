@@ -150,6 +150,28 @@ SELECT path NOT LIKE '%example.invalid%' FROM duckdb_databases() WHERE database_
 ----
 true
 
+# DuckDB's own read-only flag, not just the catalog's refusals.
+#
+# This reported FALSE until SetReadOnlyDatabase() was called. Setting
+# options.access_mode from inside the attach function is dead code twice over:
+# AttachedDatabase's constructor reads it and sets `type` BEFORE calling attach,
+# and the default is AccessMode::AUTOMATIC rather than READ_WRITE so the branch
+# was never entered. DuckDB's guard therefore never fired, and the guarantee
+# rested entirely on the catalog overrides.
+query I
+SELECT readonly FROM duckdb_databases() WHERE database_name = 'ro';
+----
+true
+
+# An EXPLICIT read-write request is refused rather than quietly downgraded: the
+# caller asked for something this extension cannot provide. AUTOMATIC — the
+# default, meaning unspecified — is not a request and is left alone, which is
+# why the plain ATTACH above succeeds.
+statement error
+ATTACH 'host=example.invalid port=2383' AS rw (TYPE xmla, READ_ONLY false);
+----
+read-only
+
 # An unknown ATTACH option is refused rather than ignored.
 statement error
 ATTACH 'host=example.invalid port=2383' AS ro2 (TYPE xmla, NONSENSE 'x');
@@ -168,22 +190,29 @@ ATTACH 'host=example.invalid port=2383 secret=absent' AS ro4 (TYPE xmla);
 ----
 not found
 
-# T-037. CATALOG-level DDL is refused by the catalog itself, before any network
-# contact: this runs against an unresolvable host and still produces the
-# read-only message rather than a connection error.
+# T-037. DDL is refused before any network contact: this runs against an
+# unresolvable host and produces a read-only refusal rather than a connection
+# error.
+#
+# The message is DuckDB's, not the extension's, and that is the improvement:
+# now that SetReadOnlyDatabase() marks the attachment, DuckDB's own guard fires
+# before the catalog is reached. The catalog's own refusals remain — they are
+# what covers a path DuckDB does not guard, and what made this an error at all
+# while the attachment was still reporting read-write.
 statement error
 CREATE SCHEMA ro.newschema;
 ----
-READ-ONLY
+attached in read-only mode
 
-# TABLE-level DDL and DML cannot be asserted server-free, and it is worth being
-# precise about why rather than writing a test that accepts any failure.
+# TABLE-level DDL cannot be asserted server-free, and it is worth being precise
+# about why rather than writing a test that accepts any failure.
 #
 # `CREATE TABLE ro.main.t` must first RESOLVE the schema `main`, and resolving a
 # schema means fetching DBSCHEMA_CATALOGS — so against an unreachable host the
-# connection fails before the refusal is reached. Against a reachable instance
-# the same statement gets the READ-ONLY message; that path is exercised by the
-# live probe, not here.
+# connection fails before EITHER guard is reached. `CREATE SCHEMA` above needs
+# no such lookup, which is why it reaches DuckDB's read-only guard and this does
+# not. Against a reachable instance this gets the read-only refusal; that path
+# is exercised by the live probe, not here.
 #
 # The guarantee does not depend on which error arrives: the extension contains no
 # path that writes, and the catalog's PlanInsert/PlanUpdate/PlanDelete/

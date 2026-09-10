@@ -33,14 +33,28 @@ unique_ptr<Catalog> XmlaAttach(optional_ptr<StorageExtensionInfo>, ClientContext
 		}
 	}
 
-	// READ_ONLY is not merely permitted, it is the only mode. Accepting
-	// `read_only false` silently would promise a writability this extension does
-	// not have — there is no path in it that mutates a server-side object.
+	// READ_ONLY is not merely permitted, it is the only mode.
+	//
+	// An earlier version set `options.access_mode = READ_ONLY` here and was dead
+	// code twice over. AttachedDatabase's constructor reads access_mode and sets
+	// `type` BEFORE it calls this function (attached_database.cpp:166-170), so
+	// the mutation came too late to be seen; and the default is
+	// AccessMode::AUTOMATIC, not READ_WRITE, so on a plain `ATTACH ... (TYPE
+	// xmla)` the branch was never entered at all. The attachment was
+	// READ_WRITE_DATABASE and duckdb_databases().readonly reported false.
+	//
+	// SetReadOnlyDatabase() sets `type` directly and works from here, so
+	// DuckDB's own guard applies as well as the catalog's refusals.
+	db.SetReadOnlyDatabase();
+
+	// An EXPLICIT request to attach read-write is refused rather than quietly
+	// downgraded: the caller asked for something this extension cannot provide,
+	// and saying so is more useful than appearing to comply. AUTOMATIC — the
+	// default, meaning "unspecified" — is not a request and is left alone.
 	if (options.access_mode == AccessMode::READ_WRITE) {
-		// DuckDB defaults to READ_WRITE when nothing is said, so this cannot be
-		// an error; it is downgraded, and the catalog refuses every mutating
-		// plan regardless (T-037).
-		options.access_mode = AccessMode::READ_ONLY;
+		throw BinderException(
+			"xmla: an Analysis Services attachment is read-only; "
+			"remove READ_ONLY false from the ATTACH options");
 	}
 
 	// Resolve at ATTACH so a missing port or an absent secret is reported HERE

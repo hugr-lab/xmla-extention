@@ -164,9 +164,20 @@ void XmlaSchemaEntry::Scan(ClientContext &context, CatalogType type,
 		return;
 	}
 	LoadTables(context);
-	std::lock_guard<std::mutex> guard(load_lock_);
-	for (auto &entry : tables_) {
-		callback(*entry.second);
+
+	// Snapshot under the lock, then release it before calling back — the same
+	// reasoning as XmlaCatalog::ScanSchemas: a callback that re-entered this
+	// object would deadlock on a plain std::mutex rather than recursing. The
+	// entries are owned by tables_ and never erased, so they outlive the lock.
+	vector<reference<CatalogEntry>> snapshot;
+	{
+		std::lock_guard<std::mutex> guard(load_lock_);
+		for (auto &entry : tables_) {
+			snapshot.push_back(*entry.second);
+		}
+	}
+	for (auto &entry : snapshot) {
+		callback(entry.get());
 	}
 }
 
