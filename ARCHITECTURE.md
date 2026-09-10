@@ -18,10 +18,10 @@ This extension removes that requirement.
 Strictly bottom-up: no lower layer includes a higher one.
 
 ```
-   catalog / functions      DuckDB surface: ATTACH, table functions, type mapping
+   catalog / functions      DuckDB surface: ATTACH, table functions, scans
         |
       client                session lifecycle, request/response, error categories
-        |
+        |                   RowCursor: rows decoded as records arrive
        auth                 GSS handshake carried inside SOAP
         |
      transport              socket lifecycle, timeouts, message reassembly
@@ -129,6 +129,63 @@ can act on without parsing text.
 `Credential` has **no password field**. Where NTLM needs one on a standalone server it is
 passed to the security layer directly and never retained.
 
+## `rowset` — the scanner, and its shape
+
+Two entry points over one scanner. `RowStreamParser` takes bytes as they arrive and hands back
+whole rows; `ParseRowset` is implemented on it for the callers that have a complete document.
+Two scanners over the same grammar would drift, and this one is a fuzz target — so every
+whole-document test also covers the streaming path, and a divergence is a test failure rather
+than a difference only the streaming caller sees.
+
+Values stay **strings**. Interpreting them is the type mapping's business one layer up; doing
+it here would put a type system in the protocol layer.
+
+A row is stored as tagged cells — `{column index, value}` in row-major order, with a
+`row_starts` index — not as a `std::map<string, string>` per row. XMLA omits a null column
+from a row **entirely**, so a row is sparse: a dense rows × columns array would need a
+validity mask beside it, while tagged cells carry absence for free. The map paid for a
+red-black node and a duplicated column *name* for every value in every row.
+
+That absence is load-bearing, and it is the reason the column list is a **union across rows**
+rather than anything a single row carries. A column that is null in every row until the last
+appears only there. Deriving a schema from row 0 has produced an all-NULL scan twice, which is
+why `xmla::ColumnMap` — the mapping from a result column name to a caller's output position —
+lives here rather than in the extension: it is pure, and putting it here made it reachable
+from the hermetic suite.
+
+`EVALUATE 'DimProduct'` qualifies its result columns as `DimProduct[ProductKey]`, an aliased
+DAX projection returns the alias (which SSAS encodes as `_x005B_ProductKey_x005D_`), and a
+DISCOVER rowset carries the bare name. `ColumnMap` accepts all three forms. Committing to one
+and being wrong does not fail loudly; it returns a column of nulls.
+
+## How a scan reads
+
+`RowCursor` is what the table scan holds. It pulls one DIME record at a time, feeds the
+unsealer, feeds the parser, and yields rows — so a query sees its first row before the server
+has sent its last.
+
+The point is **early termination**. DuckDB v2.0 passes no limit to a table function at all:
+`TableFunctionInitInput` carries the projection, the filters and the sample options, and has
+no field for a limit. A scan therefore cannot ask the server for five rows. What it can do is
+stop reading, and destroying a cursor before it is drained *abandons* the response rather than
+draining it — the remaining bytes are never pulled off the socket. That leaves the connection
+mid-message, so the session is marked failed rather than reused; there is no way back to a
+record boundary and pretending otherwise would desynchronise the next request.
+
+The projection **is** pushed down, as a DAX `SELECTCOLUMNS` list. Measured on a 60398-row fact
+table with three columns: 37.07 s for all three over the whole table, 2.22 s for one of them,
+0.27 s for all three under a `LIMIT 5`.
+
+The `WHERE` clause is **not** pushed down, and that is a measurement rather than an omission.
+Every column is presented as `VARCHAR`, so a rendered constant is always a DAX *text* literal,
+and DAX refuses to compare one against a numeric column instead of coercing it. The type would
+settle it and no read-only account can learn it: `DBSCHEMA_COLUMNS` reports `DBTYPE_WSTR` for
+every column of a tabular model, and `TMSCHEMA_COLUMNS` requires administrator rights. A
+type-agnostic rendering would route the comparison through DAX's own number-to-text
+formatting, which can silently drop rows DuckDB would have kept — and a quietly short answer
+is worse than a loud error. research D14 has the evidence; it constrains the type mapping as
+much as it constrains pushdown.
+
 ## How messages get split
 
 Three independent splits can apply to one message, each handled at a different layer, and they
@@ -153,6 +210,11 @@ of them.
 tests supply recorded bytes. Everything above the socket is therefore ordinary unit-testable
 code, and the suite runs with no server, no stub to keep in sync, and no security library.
 
+The suite that needs a Linux userspace — the SQL surface, and anything against a live
+instance — runs in a container rather than requiring a Linux host:
+`scripts/run-sql-tests.sh`. The NTLM path needs `gss-ntlmssp`, which macOS does not ship, and
+a macOS build links keg-only Homebrew krb5 and is not the artifact anyone ships.
+
 Handshake fixtures are **synthesized, never captured**. A real GSS/SPNEGO token carries the
 principal, the realm, the target service and often the machine name; a committed capture would
 be a disclosure that merely looks like an opaque blob, and no scrubber can reliably redact
@@ -169,9 +231,30 @@ the operator nothing, and a wrong guess presents as a hang.
 
 ## Current status
 
-**Working over NTLM, verified end to end.** The spike completes discovery against a live SQL
-Server 2022 instance on both a tabular and a multidimensional named instance;
-`DBSCHEMA_COLUMNS` returns 1366 rows, past every splitting threshold at once.
+**Working over NTLM, verified end to end through the DuckDB surface.** Against a live SQL
+Server 2022 instance, on both a tabular and a multidimensional named instance: `ATTACH`,
+`SHOW ALL TABLES`, `DESCRIBE`, `SELECT *`, a narrow `SELECT`, a reordered projection,
+`count(*)`, `WHERE`, `LIMIT`, a join with a local table, and `xmla_discover` /
+`xmla_execute`. `DBSCHEMA_COLUMNS` returns 1366 rows on that model, past every splitting
+threshold at once.
+
+Two of those cases only exist because a live run found them. `SELECT count(*)` crashed:
+`TableCatalogEntry` advertises `COLUMN_IDENTIFIER_ROW_ID` as a virtual `BIGINT` column,
+`LogicalGet::GetAnyColumn` handed it to the scan, and the scan wrote a `string_t` into it —
+a type-confused write DuckDB happened to catch. The table entry now advertises
+`COLUMN_IDENTIFIER_EMPTY` and no row-id columns, and the scan refuses to write into a column
+that is not `VARCHAR`. Neither is reachable without a server, which is the argument for the
+container runner.
+
+**Rows are read as `VARCHAR`.** A real type mapping needs a source that reports real types,
+and neither schema rowset does for an ordinary reader (see "How a scan reads").
+`DISCOVER_CSDL_METADATA` is the candidate.
+
+**Multidimensional models expose metadata but not row scans.** Reading rows needs `EVALUATE`,
+which is DAX; a multidimensional model is queried with MDX over cubes, dimensions and measure
+groups. The catalog reports its metadata and refuses the row scan with a message naming MDX
+and `xmla_execute`, rather than sending a DAX statement the server will reject for reasons the
+user cannot act on.
 
 **Kerberos is expected to work and is UNVERIFIED against a live server.** What is settled, and
 what is not:

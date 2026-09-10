@@ -139,6 +139,41 @@ The second is a guard, not a proof. **Grant the connecting account read-only per
 the server.** That is the only control that cannot be reasoned around, and no client-side
 check substitutes for it.
 
+## How a scan behaves
+
+A `SELECT` against an attached table **streams**. The protocol layer hands back a cursor
+rather than a whole rowset, so rows are decoded as DIME records arrive and a query that stops
+asking stops the transfer.
+
+- **The projection is pushed down.** A narrow `SELECT` sends a DAX `SELECTCOLUMNS` list, not
+  the whole table. This needs a tabular model at compatibility level 1200 or above (SSAS
+  2016+), so it is used only when it actually narrows the transfer — a `SELECT *` still sends
+  plain `EVALUATE '<table>'`.
+- **`LIMIT` works by stopping the read**, not by a DAX clause. DuckDB passes no limit to a
+  table scan at all, so the scan cannot ask the server for five rows; what it can do is
+  abandon the response, and it does.
+- **The `WHERE` clause is not pushed down**, and that is a measured decision rather than an
+  omission. Every column is currently `VARCHAR`, so a rendered constant is always a DAX
+  *text* literal, and DAX refuses to compare one against a numeric column instead of coercing
+  it: *"DAX comparison operations do not support comparing values of type Integer with values
+  of type Text."* Knowing the real type would settle it and no read-only account can get it —
+  `DBSCHEMA_COLUMNS` reports `DBTYPE_WSTR` for every column of a tabular model, and
+  `TMSCHEMA_COLUMNS` needs administrator rights. A type-agnostic rendering would route the
+  comparison through DAX's own number-to-text formatting, which can silently drop rows DuckDB
+  would keep. See research D14.
+
+Measured on a 60398-row fact table with three columns:
+
+| query | DAX sent | wall clock |
+|---|---|---|
+| all 3 columns, whole table | `EVALUATE 'T'` | 37.07 s |
+| 1 of 3 columns, whole table | `EVALUATE SELECTCOLUMNS(…)` | 2.22 s |
+| all 3 columns, `LIMIT 5` | `EVALUATE 'T'`, abandoned early | 0.27 s |
+
+Columns arrive as `VARCHAR`. The rowset that is supposed to report a column's type reports
+`WSTR` for all of them, so a real type mapping needs a different source (T-041) — and
+guessing a type from a value would not be honest.
+
 ## Nothing identifying gets committed
 
 Hostnames, addresses, account names, realms, SPNs, machine names and security identifiers are
@@ -169,6 +204,38 @@ make check
 `make fmt` reformats with the **same clang-format CI pins** (14, via a
 container). Newer versions disagree with it, so formatting with whatever is on
 your machine can produce a diff that only fails once pushed.
+
+## Testing on Linux, from any host
+
+`make check` runs everything that does not need a server or a security library. The rest —
+the SQL surface, and anything against a live instance — has to run on **Linux**: the NTLM
+path needs `gss-ntlmssp`, which macOS does not ship, and a macOS build links keg-only
+Homebrew krb5 and is not the artifact anyone ships.
+
+```bash
+./scripts/run-sql-tests.sh
+```
+
+That builds the extension and runs the hermetic suite plus every `test/sql/*.test` inside a
+container — Apple's `container` runtime on macOS, Docker elsewhere. The repository is
+bind-mounted rather than copied and the build tree is kept in `build/container`, so the first
+run takes tens of minutes and every run after it is incremental.
+
+Set `XMLA_HOST` and it also attaches a live instance and reports what it can see. Add
+`XMLA_TABLE` and it runs the scan checks that nothing server-free can reach — the projection
+pushdown, `count(*)`, the early-abandoned `LIMIT`, and the DDL refusal:
+
+```bash
+export XMLA_HOST=<address of your instance>
+export XMLA_USER='<principal>' XMLA_PASSWORD='<password>'
+export XMLA_CATALOG='<model>'
+export XMLA_TABLE='"<model>"."<table>"'
+
+./scripts/run-sql-tests.sh
+```
+
+The password is written to a 0600 file the runtime reads, never to the command line: `-e
+KEY=VALUE` puts the value in the runtime's ARGV, and `/proc/<pid>/cmdline` is world-readable.
 
 ## Running the probe against a live instance
 
@@ -202,8 +269,9 @@ prints as `<HOST>\TAB`.
 
 ### Notes on Apple `container`
 
-The script deals with two traps so you do not have to, but they are worth knowing
-because they bite everything else on the machine too.
+Both container scripts share this logic (`scripts/lib/container_runtime.sh`). They deal with
+two traps so you do not have to, but the traps are worth knowing because they bite everything
+else on the machine too.
 
 **It picks the signed binary, not the one on `PATH`.** Apple's `container`
 network plugin needs `com.apple.security.virtualization`, a *restricted*
