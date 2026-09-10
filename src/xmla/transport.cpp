@@ -215,6 +215,63 @@ void MessageStream::SendMessage(const Bytes &payload, const Bytes &options) {
 	channel_->Send(record.Encode());
 }
 
+void MessageStream::Fill() {
+	const Bytes chunk = channel_->Recv(65536);
+	if (chunk.empty()) {
+		throw ConnectionError("connection closed before a complete message arrived");
+	}
+	buffer_.insert(buffer_.end(), chunk.begin(), chunk.end());
+
+	// Reclassifying "no record set ME" as incomplete is right for chunking,
+	// but it also means a peer that never sets ME buffers until the
+	// connection closes. Bound it, and say which of the two it was.
+	if (buffer_.size() > max_buffer_) {
+		throw ProtocolError("buffered " + std::to_string(buffer_.size()) +
+							" bytes without a complete DIME message (limit " + std::to_string(max_buffer_) +
+							"); the peer never set ME, or the stream is desynchronised");
+	}
+}
+
+void MessageStream::ReceiveRecord(Bytes &payload, bool &more) {
+	if (desynchronised_) {
+		throw ProtocolError("the message stream was abandoned part-way and cannot be read again");
+	}
+	for (;;) {
+		size_t next = 0;
+		try {
+			dime::Record record = dime::DecodeRecord(buffer_.data(), buffer_.size(), 0, next);
+			buffer_.erase(buffer_.begin(), buffer_.begin() + static_cast<long>(next));
+			if (!in_message_) {
+				if (!record.mb) {
+					throw ProtocolError("first DIME record does not set MB");
+				}
+				dime::CheckNegotiated(record.options, record.type_);
+				in_message_ = true;
+			}
+			payload.swap(record.data);
+			more = !record.me;
+			if (record.me) {
+				in_message_ = false;
+			}
+			return;
+		} catch (const IncompleteMessage &) {
+			// Not enough bytes yet. Every OTHER ProtocolError is malformed input
+			// and propagates - discriminating on message text got this wrong for
+			// chunked messages split at a record boundary.
+		}
+		Fill();
+	}
+}
+
+void MessageStream::AbandonMessage() {
+	if (!in_message_) {
+		return;
+	}
+	in_message_ = false;
+	desynchronised_ = true;
+	buffer_.clear();
+}
+
 Bytes MessageStream::ReceiveMessage() {
 	for (;;) {
 		bool complete = false;
@@ -234,20 +291,7 @@ Bytes MessageStream::ReceiveMessage() {
 			return parsed.payload;
 		}
 
-		const Bytes chunk = channel_->Recv(65536);
-		if (chunk.empty()) {
-			throw ConnectionError("connection closed before a complete message arrived");
-		}
-		buffer_.insert(buffer_.end(), chunk.begin(), chunk.end());
-
-		// Reclassifying "no record set ME" as incomplete is right for chunking,
-		// but it also means a peer that never sets ME buffers until the
-		// connection closes. Bound it, and say which of the two it was.
-		if (buffer_.size() > max_buffer_) {
-			throw ProtocolError("buffered " + std::to_string(buffer_.size()) +
-								" bytes without a complete DIME message (limit " + std::to_string(max_buffer_) +
-								"); the peer never set ME, or the stream is desynchronised");
-		}
+		Fill();
 	}
 }
 

@@ -1,0 +1,310 @@
+#include "xmla_connection.hpp"
+
+#include "duckdb/main/secret/secret_manager.hpp"
+#include "xmla/connection_string.hpp"
+#include "xmla/errors.hpp"
+
+#include <algorithm>
+#include <cstdlib>
+
+namespace duckdb {
+
+namespace {
+
+std::string LowerAscii(const std::string &in) {
+	std::string out = in;
+	std::transform(out.begin(), out.end(), out.begin(),
+				   [](char c) { return (c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c; });
+	return out;
+}
+
+//! strtoul, not atoi: atoi truncates silently, so `port=65538` would become
+//! port 2 — reintroducing the guess-and-hang this option set exists to avoid.
+uint16_t ParsePort(const std::string &value) {
+	char *end = nullptr;
+	const unsigned long parsed = std::strtoul(value.c_str(), &end, 10);
+	if (value.empty() || (end && *end != '\0') || parsed < 1 || parsed > 65535) {
+		throw BinderException("xmla: port must be a number in 1..65535");
+	}
+	return static_cast<uint16_t>(parsed);
+}
+
+//! An UPPER bound as well as a lower one.
+//!
+//! `!(parsed > 0)` alone accepts `inf` — strtod consumes the whole string — and
+//! any finite monster like 1e300. Both reach SocketChannel, where
+//! `static_cast<time_t>(seconds)` and `static_cast<long long>(seconds * 1000)`
+//! are undefined behaviour outside the target's range. A day is far beyond any
+//! legitimate query and comfortably inside every integer type involved.
+static const double kMaxTimeoutSeconds = 86400.0;
+
+double ParseTimeout(const std::string &value) {
+	char *end = nullptr;
+	const double parsed = std::strtod(value.c_str(), &end);
+	if (value.empty() || (end && *end != '\0') || !(parsed > 0) || !(parsed <= kMaxTimeoutSeconds)) {
+		throw BinderException("xmla: timeout must be a positive number of seconds, at most %.0f", kMaxTimeoutSeconds);
+	}
+	return parsed;
+}
+
+//! Refuse an unrecognised boolean rather than reading it as false.
+//!
+//! `use_port` selects between two different SPNs, so `use_port=yes` or
+//! `use_port=flase` quietly meaning false presents as a Kerberos failure with no
+//! hint at the cause — and it contradicts the stance this file takes ten lines
+//! away for an unknown KEY.
+bool ParseBool(const std::string &key, const std::string &value) {
+	const std::string lowered = LowerAscii(value);
+	if (lowered == "true" || lowered == "1" || lowered == "yes" || lowered == "on") {
+		return true;
+	}
+	if (lowered == "false" || lowered == "0" || lowered == "no" || lowered == "off") {
+		return false;
+	}
+	// The KEY only, not the value. Every other parser in this file does the
+	// same: ParsePort names the range, ParseTimeout names the bound, and the
+	// unknown-option error echoes the key. A connection string's contents reach
+	// the query log and every error display, and there is a test that exists
+	// specifically to assert a rejected connection string is not echoed back.
+	// The key alone says which option to look at.
+	throw BinderException("xmla: %s must be true or false", key);
+}
+
+}  // namespace
+
+XmlaConnectionParams XmlaConnectionParams::FromString(const std::string &connection) {
+	XmlaConnectionParams params;
+
+	// Tokenising lives in the protocol layer (xmla::ParseConnectionString) so the
+	// hermetic suite can test it. It shipped once with a bug those tests catch
+	// immediately: it split only on ';' while the documented form is
+	// space-separated, so `host=x port=2383` parsed as one pair and the port
+	// silently stayed 0 — surfacing as "port is required" against a string that
+	// plainly contains one.
+	std::map<std::string, std::string> options;
+	try {
+		options = xmla::ParseConnectionString(connection);
+	} catch (const xmla::XmlaError &error) {
+		throw BinderException("xmla: %s", error.what());
+	}
+
+	for (const auto &option : options) {
+		const std::string &key = option.first;
+		const std::string &value = option.second;
+		if (key == "host") {
+			params.host = value;
+		} else if (key == "port") {
+			params.port = ParsePort(value);
+		} else if (key == "mechanism") {
+			params.mechanism = LowerAscii(value);
+		} else if (key == "user") {
+			params.user = value;
+		} else if (key == "catalog") {
+			params.catalog = value;
+		} else if (key == "spn") {
+			params.spn = value;
+		} else if (key == "instance") {
+			params.instance = value;
+		} else if (key == "use_port") {
+			params.use_port = ParseBool("use_port", value);
+		} else if (key == "timeout") {
+			params.timeout_seconds = ParseTimeout(value);
+		} else if (key == "secret") {
+			params.secret_name = value;
+		} else if (key == "password") {
+			// Refused, not accepted-and-hidden. A password in a connection string
+			// reaches the query log, the plan, and every error that echoes the
+			// statement. Secrets exist for this.
+			throw BinderException(
+				"xmla: a password may not be given in the connection string; "
+				"use CREATE SECRET (TYPE xmla, ...) and pass secret=<name>");
+		} else {
+			// An unknown key is an ERROR. Ignoring one means a typo'd
+			// `mechansim=ntlm` silently authenticates with the default mechanism
+			// instead — the caller asked for something and got something else.
+			throw BinderException(
+				"xmla: unknown connection option '%s'. Known: host, port, "
+				"mechanism, user, catalog, spn, instance, use_port, timeout, secret",
+				key);
+		}
+	}
+	return params;
+}
+
+std::string XmlaConnectionParams::ApplySecret(ClientContext &context) {
+	if (secret_name.empty()) {
+		return std::string();
+	}
+	auto &manager = SecretManager::Get(context);
+	auto transaction = CatalogTransaction::GetSystemCatalogTransaction(context);
+	auto entry = manager.GetSecretByName(transaction, secret_name);
+	if (!entry) {
+		throw BinderException(
+			"xmla: secret '%s' not found. Create it with: CREATE SECRET %s "
+			"(TYPE xmla, MECHANISM 'ntlm', USER '...', PASSWORD '...')",
+			secret_name, secret_name);
+	}
+	// The TYPE is checked. SecretManager::GetSecretByName does not filter by it,
+	// so `secret=my_s3_creds` was accepted: every TryGetValue missed, and the
+	// connection proceeded with no user, no password and the Kerberos default —
+	// presenting as an authentication failure rather than as the naming mistake
+	// it is.
+	if (entry->secret->GetType() != "xmla") {
+		throw BinderException(
+			"xmla: secret '%s' is of type '%s', not 'xmla'. Create one with: "
+			"CREATE SECRET %s (TYPE xmla, MECHANISM 'ntlm', USER '...', PASSWORD '...')",
+			secret_name, entry->secret->GetType(), secret_name);
+	}
+	const auto *kv = dynamic_cast<const KeyValueSecret *>(entry->secret.get());
+	if (!kv) {
+		throw BinderException("xmla: secret '%s' does not carry key/value fields", secret_name);
+	}
+	const auto &secret = *kv;
+
+	auto take = [&](const char *key, std::string &target) {
+		if (!target.empty()) {
+			return;	 // the connection string wins; it is more specific
+		}
+		const Value value = secret.TryGetValue(key);
+		if (!value.IsNull()) {
+			target = value.ToString();
+		}
+	};
+	take("user", user);
+	take("mechanism", mechanism);
+	take("host", host);
+	take("spn", spn);
+
+	if (port == 0) {
+		const Value port_value = secret.TryGetValue("port");
+		if (!port_value.IsNull()) {
+			// Through ParsePort, NOT a bare static_cast. The cast was exactly the
+			// silent truncation ParsePort exists to prevent: PORT 65538 became 2,
+			// PORT -1 became 65535, and PORT 65536 became 0 — which then surfaced
+			// as "port is required" against a secret that plainly sets one.
+			port = ParsePort(port_value.ToString());
+		}
+	}
+
+	// Read and returned, never stored on this struct.
+	const Value password_value = secret.TryGetValue("password");
+	if (!password_value.IsNull()) {
+		return password_value.ToString();
+	}
+	return std::string();
+}
+
+void XmlaConnectionParams::ApplyDefaults() {
+	if (mechanism.empty()) {
+		// Kerberos is the default because it is what a domain deployment uses.
+		// It is applied HERE, after the secret has had its say — applying it at
+		// construction made the default beat a secret's mechanism='ntlm', and
+		// every connection then attempted Kerberos regardless.
+		mechanism = "kerberos";
+	}
+}
+
+void XmlaConnectionParams::Validate() const {
+	if (host.empty()) {
+		throw BinderException("xmla: host is required");
+	}
+	if (port == 0) {
+		// No default, deliberately: a default would invite guessing between a
+		// default instance's well-known port and a named instance's pinned one,
+		// and guessing wrong presents as a hang. There is also no
+		// named-instance redirector to ask (research D9).
+		throw BinderException(
+			"xmla: port is required and must be pinned. There is no default and "
+			"no named-instance redirector; pin it in msmdsrv.ini");
+	}
+	if (timeout_seconds <= 0) {
+		throw BinderException("xmla: timeout must be positive; unbounded waits are not offered");
+	}
+}
+
+xmla::ConnectionTarget XmlaConnectionParams::Target() const {
+	xmla::ConnectionTarget target;
+	target.host = host;
+	target.port = port;
+	target.timeout_seconds = timeout_seconds;
+	return target;
+}
+
+xmla::Credential XmlaConnectionParams::Credential() const {
+	xmla::Credential credential;
+	credential.mechanism = mechanism;
+	credential.principal = user;
+	credential.spn_override = spn;
+	credential.instance = instance;
+	credential.use_port = use_port;
+	return credential;
+}
+
+std::string XmlaConnectionParams::Resolve(ClientContext &context) {
+	// Order matters and is enforced here rather than trusted to callers.
+	const std::string password = ApplySecret(context);
+	ApplyDefaults();
+	Validate();
+	return password;
+}
+
+[[noreturn]] void RethrowXmlaError(const xmla::XmlaError &error) {
+	// Concatenated, not formatted: a server's own explanation can contain a `%`,
+	// and the variadic Exception constructors treat their first argument as a
+	// format string. The single-argument overloads take the message verbatim.
+	const std::string message = "xmla: " + std::string(error.what());
+
+	// Most derived first. IncompleteMessage derives from ProtocolError, and both
+	// want the same answer here, but ordering by derivation is the habit that
+	// keeps this correct when they stop wanting the same answer.
+	if (dynamic_cast<const xmla::ConnectionError *>(&error)) {
+		// Never reached a server: host, port, firewall.
+		throw ConnectionException(message);
+	}
+	if (dynamic_cast<const xmla::AuthenticationError *>(&error)) {
+		// Reached the server, could not say who we are. That is the credential
+		// or the mechanism — configuration, not I/O.
+		throw InvalidConfigurationException(message);
+	}
+	if (dynamic_cast<const xmla::AuthorizationError *>(&error)) {
+		throw PermissionException(message);
+	}
+	if (dynamic_cast<const xmla::NegotiationError *>(&error)) {
+		// The server refused clear-text XML. This extension does not implement
+		// binary XML or compression, so the honest answer is that what the
+		// server wants is not implemented here — loudly, per the category's own
+		// reason for existing.
+		throw NotImplementedException(message);
+	}
+	if (dynamic_cast<const xmla::ServerError *>(&error)) {
+		// The server understood the request and rejected it, so the request is
+		// what was wrong.
+		throw InvalidInputException(message);
+	}
+	// ProtocolError, IncompleteMessage, and anything added later: the bytes on
+	// the wire were not what the specification requires.
+	throw IOException(message);
+}
+
+std::unique_ptr<xmla::Session> OpenSession(ClientContext &context, XmlaConnectionParams params) {
+	// The password lives for the duration of this function and no longer. It is
+	// handed to GssContext::Create, which passes it to the security layer without
+	// retaining it, and is never placed on the Session.
+	const std::string password = params.Resolve(context);
+	if (getenv("XMLA_DEBUG")) {
+		// SHAPES ONLY, never values (constitution I). This exists because the
+		// bug it found was invisible any other way: "the connection string wins
+		// over the secret" was implemented as "non-empty wins", so mechanism's
+		// non-empty DEFAULT beat a secret's mechanism='ntlm' and every
+		// connection silently attempted Kerberos.
+		fprintf(stderr, "[xmla] mechanism=%s principal_set=%d password_len=%zu port=%u\n", params.mechanism.c_str(),
+				params.user.empty() ? 0 : 1, password.size(), static_cast<unsigned>(params.port));
+	}
+
+	auto session = make_uniq<xmla::Session>(params.Target(), params.Credential());
+	auto gss = xmla::GssContext::Create(params.Credential(), params.host, params.port, password);
+	session->Open(nullptr, std::move(gss));
+	return session;
+}
+
+}  // namespace duckdb

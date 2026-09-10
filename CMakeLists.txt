@@ -43,9 +43,49 @@ if(PkgConfig_FOUND)
     pkg_check_modules(XMLA_KRB5 QUIET krb5)
     if(XMLA_GSSAPI_FOUND AND XMLA_KRB5_FOUND)
         set(XMLA_GSS_FOUND TRUE)
-        set(XMLA_GSS_LIBRARIES ${XMLA_GSSAPI_LIBRARIES} ${XMLA_KRB5_LIBRARIES})
         set(XMLA_GSS_INCLUDE_DIRS ${XMLA_GSSAPI_INCLUDE_DIRS} ${XMLA_KRB5_INCLUDE_DIRS})
-        link_directories(${XMLA_GSSAPI_LIBRARY_DIRS} ${XMLA_KRB5_LIBRARY_DIRS})
+
+        # ABSOLUTE paths, not `-lname` plus link_directories().
+        #
+        # link_directories() applies to targets created in the SAME directory
+        # scope and below, and the extension's archive is linked into DuckDB's
+        # own targets, which are created in duckdb/'s scope. The -L therefore
+        # never reached the link line: verified on the failing command, which
+        # carried `-lgssapi_krb5 -lkrb5 -lk5crypto -lcom_err` and no -L at all.
+        #
+        # On macOS that is not a missing library, it is the WRONG one. Apple
+        # ships /usr/lib/libgssapi_krb5.dylib as a Heimdal-backed shim, so the
+        # link succeeds at finding it and then fails on exactly the symbols the
+        # keg-only Homebrew krb5 was installed to provide -- gss_wrap_iov,
+        # gss_unwrap_iov, gss_wrap_iov_length, gss_release_iov_buffer and
+        # gss_acquire_cred_with_password. The documented instruction in the
+        # error message below (brew install krb5, then PKG_CONFIG_PATH=...) did
+        # not work as written until this resolved each name to a full path.
+        #
+        # Where pkg-config reports no library directory -- the ordinary Linux
+        # case, where the libraries are on the default search path -- the plain
+        # name is kept and the linker resolves it as before.
+        #
+        # On macOS this also fixes the RUNTIME dependency to the Homebrew prefix:
+        # Homebrew's krb5 sets each dylib's LC_ID_DYLIB to its opt path, so the
+        # consumer records /opt/homebrew/opt/krb5/lib/libgssapi_krb5.2.2.dylib
+        # (verified with `otool -L`) and the extension loads only where that
+        # prefix is populated. Linking the archives instead would avoid it, and
+        # the Homebrew bottle ships none. So a macOS build is a LOCAL build:
+        # osx_amd64 and osx_arm64 are in excluded_platforms in description.yml,
+        # and the README says so next to the brew instruction.
+        set(XMLA_GSS_LIBRARIES "")
+        foreach(xmla_gss_lib IN LISTS XMLA_GSSAPI_LIBRARIES XMLA_KRB5_LIBRARIES)
+            find_library(XMLA_GSS_LIB_${xmla_gss_lib}
+                NAMES ${xmla_gss_lib}
+                HINTS ${XMLA_GSSAPI_LIBRARY_DIRS} ${XMLA_KRB5_LIBRARY_DIRS}
+                NO_DEFAULT_PATH)
+            if(XMLA_GSS_LIB_${xmla_gss_lib})
+                list(APPEND XMLA_GSS_LIBRARIES ${XMLA_GSS_LIB_${xmla_gss_lib}})
+            else()
+                list(APPEND XMLA_GSS_LIBRARIES ${xmla_gss_lib})
+            endif()
+        endforeach()
         message(STATUS "xmla: MIT GSSAPI ${XMLA_GSSAPI_VERSION}, krb5 ${XMLA_KRB5_VERSION}")
     endif()
 endif()
@@ -97,6 +137,7 @@ endif()
 # Analysis Services instance (constitution III), and T-032 enforces it.
 # =============================================================================
 set(XMLA_PROTOCOL_SOURCES
+    src/xmla/connection_string.cpp
     src/xmla/dime.cpp
     src/xmla/transport.cpp
     src/xmla/sealing.cpp
@@ -178,7 +219,17 @@ if(COMMAND build_loadable_extension)
     #
     # The layering rule is unaffected: it is enforced at SOURCE level by
     # scripts/ci/check_layering.sh, not by which library a file lands in.
-    set(XMLA_EXTENSION_SOURCES src/xmla_extension.cpp ${XMLA_PROTOCOL_SOURCES})
+    set(XMLA_EXTENSION_SOURCES
+        src/xmla_extension.cpp
+        src/xmla_connection.cpp
+        src/xmla_secret.cpp
+        src/xmla_functions.cpp
+        src/xmla_storage.cpp
+        src/catalog/xmla_catalog.cpp
+        src/catalog/xmla_schema_entry.cpp
+        src/catalog/xmla_table_entry.cpp
+        src/catalog/xmla_transaction.cpp
+        ${XMLA_PROTOCOL_SOURCES})
     if(XMLA_GSS_FOUND)
         list(APPEND XMLA_EXTENSION_SOURCES src/xmla/gss_context.cpp)
     endif()

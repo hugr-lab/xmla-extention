@@ -55,8 +55,10 @@ jobs:
       # a locale fix had silently failed to apply). Excluding the query
       # repo-wide would have thrown that away; excluding the test TARGET does
       # not.
-      # The DEFAULT target, which builds only what ships: xmla_test is
-      # EXCLUDE_FROM_ALL in CMakeLists.txt. A hardcoded list here would silently
+      # The DEFAULT target, which builds only what ships: xmla_test is excluded by the
+      # -DXMLA_BUILD_TESTS=OFF on the configure line above — NOT by CMakeLists.txt,
+      # which defaults it ON so `ctest` and the README's build-then-run work.
+      # Dropping that flag silently puts test/cpp back in the database. A hardcoded list here would silently
       # drop any new shipped target — the DuckDB extension target most of all,
       # which does not exist yet — and nothing would fail; the database would
       # just quietly stop covering it.

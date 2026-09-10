@@ -64,11 +64,21 @@ test-protocol:
 check: test-protocol
 	./scripts/ci/check_layering.sh
 	./scripts/ci/check_locale_independence.sh
-	@[ -f duckdb/src/include/duckdb.hpp ] \
-		&& ./scripts/ci/check_extension_compiles.sh \
-		|| echo "note: skipped extension compile (duckdb submodule not checked out)."
+	@# `if`, NOT `A && B || C`. The && form SWALLOWS B's failure: when the
+	@# submodule is present and the script exits non-zero, the `||` branch fires,
+	@# echo returns 0, and the recipe line succeeds — so `make check` reported
+	@# success over a real failure AND printed the "skipped" note, which is a lie
+	@# about what happened. Verified: with a deliberately misformatted file,
+	@# `make check` exited 0 while clang-format printed violations.
+	@if [ -f duckdb/src/include/duckdb.hpp ]; then \
+		./scripts/ci/check_extension_compiles.sh; \
+	else \
+		echo "note: skipped extension compile (duckdb submodule not checked out)."; \
+	fi
 	./test/hooks/test_leak_gate.sh
 	LEAK_GATE_FILES_CMD="git ls-files -z" .githooks/pre-commit
-	@command -v docker >/dev/null 2>&1 \
-		&& ./scripts/ci/clang_format.sh --check \
-		|| echo "note: skipped clang-format (no docker). CI pins version 14; run 'make fmt-check' before pushing."
+	@if command -v docker >/dev/null 2>&1; then \
+		./scripts/ci/clang_format.sh --check; \
+	else \
+		echo "note: skipped clang-format (no docker). CI pins version 14; run 'make fmt-check' before pushing."; \
+	fi

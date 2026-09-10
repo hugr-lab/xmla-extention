@@ -99,22 +99,40 @@ marked below.
 
 ### DuckDB surface
 
-- [ ] **T-034** `xmla_secret`: a DuckDB secret type carrying mechanism, user and password, so
+- [x] **T-034** `xmla_secret`: a DuckDB secret type carrying mechanism, user and password, so
       no credential is passed through a connection string into a query log.
-- [ ] **T-035** `xmla_discover` table function over `client::discover`.
-- [ ] **T-036** `ATTACH ... (TYPE xmla)` → storage extension → catalog; catalogs as schemas,
+- [x] **T-035** `xmla_discover` table function over `client::discover`.
+- [x] **T-036** `ATTACH ... (TYPE xmla)` → storage extension → catalog; catalogs as schemas,
       tables as tables, columns typed from `DBSCHEMA_COLUMNS`. (FR-027)
-- [ ] **T-037** Catalog refuses DDL/DML explicitly rather than inheriting a default that might
+- [x] **T-037** Catalog refuses DDL/DML explicitly rather than inheriting a default that might
       translate them. (FR-028)
 
-**Checkpoint**: attach an instance and list its catalogs, tables and columns.
+**Checkpoint MET.** Verified against a live SQL Server 2022 tabular instance: `ATTACH`,
+`SHOW ALL TABLES`, `DESCRIBE`, `SELECT ... ORDER BY`, and a join between an SSAS table and a
+local DuckDB relation. `INSERT` and `CREATE SCHEMA` are refused with the read-only message.
+
+What D13 records about the rowsets is the part that took the measuring: only `TABLE_TYPE =
+'TABLE'` is a user table, the `$` prefix is internal, `EVALUATE` qualifies its columns as
+`<table>[<column>]`, and it omits the `RowNumber-<GUID>` surrogate. Each of those produced a
+visibly wrong catalog before it was measured.
 
 ## Phase 4: User Story 2 — read-only query (P2)
 
 - [ ] **T-040** `xmla_execute` table function.
 - [ ] **T-041** Type mapping from the rowset's declared column types to DuckDB types, with
-      anything unmapped arriving as `VARCHAR` rather than being guessed at.
-- [ ] **T-042** Scan pushdown for the catalog path where the rowset supports a restriction.
+      anything unmapped arriving as `VARCHAR` rather than being guessed at. NOT from
+      `DBSCHEMA_COLUMNS`: it reports `DBTYPE_WSTR` for every column of a tabular model, and
+      `TMSCHEMA_COLUMNS` needs administrator rights. `DISCOVER_CSDL_METADATA` is the
+      candidate. (research D14)
+- [x] **T-042** Scan pushdown, and a row shape that suits a fact table. Delivered: a
+      `RowCursor` from the protocol layer in place of a whole `Rowset`, so a scan stops
+      reading when the executor stops asking (`LIMIT 5` over 60398 rows: 37.07 s → 0.27 s);
+      projection pushdown as a DAX `SELECTCOLUMNS` list (1 of 3 columns: 37.07 s → 2.22 s);
+      and `Rowset` re-laid-out as tagged cells rather than a `std::map` per row. Filter
+      pushdown is NOT done, and research D14 records the measurement that decided it — DAX
+      refuses comparing a text literal against a numeric column, and no non-admin rowset
+      reveals which columns those are. Limit pushdown is not expressible: DuckDB v2.0 passes
+      no limit to a table function at all. (research D14)
 
 ## Phase 5: User Story 3 — ambient identity (P3)
 

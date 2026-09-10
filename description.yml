@@ -10,27 +10,47 @@ extension:
     - "VGSML"
   # Windows is excluded on purpose rather than by omission: a Windows user
   # already has msolap, and the whole point of this extension is to reach SSAS
-  # without COM. macOS needs MIT krb5 from Homebrew, because Apple's
-  # GSS.framework exports no gss_wrap_iov and no NTLM mechanism and therefore
-  # cannot seal a message at all.
-  excluded_platforms: "windows_amd64;windows_amd64_mingw;windows_arm64;wasm_mvp;wasm_eh;wasm_threads"
+  # without COM.
+  #
+  # macOS is excluded because a macOS build cannot be REDISTRIBUTED. Apple's
+  # GSS.framework exports no gss_wrap_iov and no NTLM mechanism, so it cannot
+  # seal a message at all and MIT krb5 from Homebrew is the only option there.
+  # Homebrew's krb5 is keg-only and ships no static archives, so the extension
+  # links the dylibs and records their install names verbatim —
+  # `otool -L` on the built extension shows
+  # /opt/homebrew/opt/krb5/lib/libgssapi_krb5.2.2.dylib. The artifact then loads
+  # only on a machine with that exact prefix populated. A registry builder has
+  # no Homebrew krb5 at all, so the build would fail there rather than publish
+  # something that half works. macOS remains a supported LOCAL build; see the
+  # README.
+  excluded_platforms: "windows_amd64;windows_amd64_mingw;windows_arm64;osx_amd64;osx_arm64;wasm_mvp;wasm_eh;wasm_threads"
 
 repo:
   github: "hugr-lab/xmla-extention"
-  # An immutable commit SHA, not a branch: the community-extensions build checks
-  # out this exact object so a published build is reproducible, and its
-  # validation rejects a branch name. Update it with each release.
-  ref: "0000000000000000000000000000000000000000"
+  # PLACEHOLDER — MUST be replaced with a real commit SHA before submitting to
+  # the community-extensions registry. All-zeroes is not a resolvable object, so
+  # a build from this file fails at checkout; that is deliberate, because the
+  # alternative (a branch name) is silently accepted here and rejected by the
+  # registry's own validation, and a stale SHA would publish the wrong tree.
+  #
+  # An immutable SHA is required because the registry checks out this exact
+  # object, so a published build is reproducible.
+  ref: "0000000000000000000000000000000000000000"  # REPLACE BEFORE SUBMITTING
 
 docs:
-  # 0.0.1 registers no functions and no ATTACH path — the protocol layer is
-  # complete and verified against a live instance, the SQL surface is T-034..T-037.
-  # A copy-pasteable example that cannot work is worse than none, so this shows
-  # only what 0.0.1 actually does.
   hello_world: |
     INSTALL xmla FROM community;
     LOAD xmla;
-    SELECT extension_version FROM duckdb_extensions() WHERE extension_name = 'xmla';
+
+    CREATE SECRET ssas (TYPE xmla, MECHANISM 'ntlm', USER 'reader', PASSWORD '...');
+    ATTACH 'host=ssas-host port=2383 secret=ssas' AS aw (TYPE xmla);
+
+    SHOW ALL TABLES;
+    SELECT * FROM aw."Adventure Works".DimProduct LIMIT 10;
+
+    -- or without ATTACH, for metadata and DAX
+    SELECT CUBE_NAME FROM xmla_discover('host=ssas-host port=2383 secret=ssas', 'MDSCHEMA_CUBES');
+    SELECT * FROM xmla_execute('host=ssas-host port=2383 secret=ssas', 'EVALUATE Sales');
 
   extended_description: |
     Reads SQL Server Analysis Services over the **native XMLA/TCP binding**, so a
@@ -52,7 +72,13 @@ docs:
       assembles one. It is marked unverified rather than claimed.
 
     Read-only, in two tiers: metadata by construction (no mutating envelope
-    builder exists) and statements by validation (the XMLA `<Statement>` element
-    carries the whole command surface, so it is checked against a query
-    allowlist). Grant the connecting account read-only permissions on the server;
-    that is the only control that cannot be reasoned around.
+    builder exists, and the catalog refuses every mutating plan) and statements
+    by validation (the XMLA `<Statement>` element carries the whole command
+    surface, so it is checked against a query allowlist). Grant the connecting
+    account read-only permissions on the server; that is the only control that
+    cannot be reasoned around.
+
+    Tabular models support `SELECT` on their tables. Multidimensional models
+    expose their metadata but not row scans: reading rows needs DAX `EVALUATE`,
+    and multidimensional data is queried with MDX — use `xmla_execute` for that
+    rather than having the extension send a statement the server will reject.

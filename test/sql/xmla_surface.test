@@ -1,0 +1,407 @@
+# name: test/sql/xmla_surface.test
+# description: the SQL surface that can be checked WITHOUT a server
+# group: [xmla]
+#
+# Everything here is server-free on purpose. Constitution III: the default suite
+# must pass on a machine that has never contacted an Analysis Services instance.
+# Anything needing a live instance belongs in the probe (scripts/run-probe.sh).
+
+require xmla
+
+# The extension loads and reports the version description.yml publishes, not a
+# commit hash — which is what it reported before EXTENSION_VERSION was set.
+query I
+SELECT extension_version FROM duckdb_extensions() WHERE extension_name = 'xmla';
+----
+0.0.1
+
+# Both table functions are registered.
+query II
+SELECT function_name, function_type FROM duckdb_functions()
+WHERE function_name IN ('xmla_discover', 'xmla_execute') ORDER BY function_name;
+----
+xmla_discover	table
+xmla_execute	table
+
+# The secret type is registered, and a password never appears in the secret's
+# printed form.
+statement ok
+CREATE SECRET s1 (TYPE xmla, MECHANISM 'ntlm', USER 'someone', PASSWORD 'hunter2');
+
+query I
+SELECT secret_string NOT LIKE '%hunter2%' FROM duckdb_secrets() WHERE name = 's1';
+----
+true
+
+query I
+SELECT secret_string LIKE '%password=redacted%' FROM duckdb_secrets() WHERE name = 's1';
+----
+true
+
+# An unknown secret field is refused rather than stored and ignored: a
+# misspelled 'passwrd' would otherwise leave the secret silently without one.
+#
+# DuckDB rejects it first, from the function's declared named_parameters, so this
+# asserts DuckDB's message rather than the extension's. The extension keeps its
+# own check as a backstop for a field that is declared but not handled — a state
+# only a future edit can create.
+statement error
+CREATE SECRET s2 (TYPE xmla, PASSWRD 'x');
+----
+Unknown parameter
+
+# A port is required. There is no default and no named-instance redirector, and
+# a wrong guess presents as a hang rather than an error.
+statement error
+SELECT * FROM xmla_discover('host=example.invalid', 'DBSCHEMA_CATALOGS');
+----
+port is required
+
+statement error
+SELECT * FROM xmla_discover('port=2383', 'DBSCHEMA_CATALOGS');
+----
+host is required
+
+# A port outside range is refused, not silently truncated: atoi would turn 65538
+# into port 2.
+statement error
+SELECT * FROM xmla_discover('host=example.invalid port=65538', 'DBSCHEMA_CATALOGS');
+----
+port must be a number in 1..65535
+
+# An unknown option is an error. Ignoring one means a typo'd mechanism silently
+# authenticates with something the caller did not ask for.
+statement error
+SELECT * FROM xmla_discover('host=example.invalid port=2383 mechansim=ntlm', 'DBSCHEMA_CATALOGS');
+----
+unknown connection option
+
+# A password may not travel in a connection string: that string reaches the
+# query log and the plan.
+statement error
+SELECT * FROM xmla_discover('host=example.invalid port=2383 password=x', 'DBSCHEMA_CATALOGS');
+----
+may not be given in the connection string
+
+# A malformed connection string is refused, and the message does not echo it.
+statement error
+SELECT * FROM xmla_discover('this is not a pair', 'DBSCHEMA_CATALOGS');
+----
+not a sequence of key=value pairs
+
+# Read-only by validation. <Statement> carries the whole command surface, so
+# these all build a well-formed envelope a server would accept and apply.
+#
+# `host=example.invalid` cannot resolve, which is the point: these are refused
+# BEFORE any connection is attempted. The guard used to run inside
+# Session::Execute — after the socket, the handshake and the sealing context — so
+# these reported a connection failure instead, and against a reachable host would
+# have spent a full authenticated round trip to reach a verdict that depends on
+# nothing but the string.
+statement error
+SELECT * FROM xmla_execute('host=example.invalid port=2383', 'UPDATE CUBE [S] SET (m) = 0');
+----
+read-only
+
+statement error
+SELECT * FROM xmla_execute('host=example.invalid port=2383', 'DROP MINING MODEL [M]');
+----
+read-only
+
+statement error
+SELECT * FROM xmla_execute('host=example.invalid port=2383', 'CALL SystemRestoreBackup(''x'')');
+----
+read-only
+
+# A statement batch is refused even though it opens with a query keyword: SSMS
+# sends semicolon-separated MDX as a single Execute/Statement.
+statement error
+SELECT * FROM xmla_execute('host=example.invalid port=2383', 'EVALUATE T; UPDATE CUBE [S] SET (m) = 0');
+----
+statement separator
+
+# A named secret that does not exist is named as such, rather than surfacing as
+# an authentication failure later.
+statement error
+SELECT * FROM xmla_discover('host=example.invalid port=2383 secret=nope', 'DBSCHEMA_CATALOGS');
+----
+not found
+
+# --- ATTACH (T-036) and read-only refusal (T-037) -----------------------------
+#
+# Still server-free. ATTACH deliberately contacts nothing: schemas load on first
+# use, so attaching an unreachable instance SUCCEEDS and the first query reports
+# the failure. That is what makes these cases possible without a server, and it
+# is a deliberate difference from the neighbouring mssql extension's eager
+# validation — an instance powered off between sessions would otherwise make
+# every ATTACH in a script fail, even for a catalog the script never touches.
+statement ok
+ATTACH 'host=example.invalid port=2383' AS ro (TYPE xmla);
+
+query I
+SELECT count(*) FROM duckdb_databases() WHERE database_name = 'ro';
+----
+1
+
+# The path reported for the attached database is NOT the host: this string
+# surfaces in duckdb_databases() and in error messages (constitution I).
+query I
+SELECT path NOT LIKE '%example.invalid%' FROM duckdb_databases() WHERE database_name = 'ro';
+----
+true
+
+# DuckDB's own read-only flag, not just the catalog's refusals.
+#
+# This reported FALSE until SetReadOnlyDatabase() was called. Setting
+# options.access_mode from inside the attach function is dead code twice over:
+# AttachedDatabase's constructor reads it and sets `type` BEFORE calling attach,
+# and the default is AccessMode::AUTOMATIC rather than READ_WRITE so the branch
+# was never entered. DuckDB's guard therefore never fired, and the guarantee
+# rested entirely on the catalog overrides.
+query I
+SELECT readonly FROM duckdb_databases() WHERE database_name = 'ro';
+----
+true
+
+# An EXPLICIT read-write request is refused rather than quietly downgraded: the
+# caller asked for something this extension cannot provide. AUTOMATIC — the
+# default, meaning unspecified — is not a request and is left alone, which is
+# why the plain ATTACH above succeeds.
+statement error
+ATTACH 'host=example.invalid port=2383' AS rw (TYPE xmla, READ_ONLY false);
+----
+read-only
+
+# The same request said the other way round.
+statement error
+ATTACH 'host=example.invalid port=2383' AS rw2 (TYPE xmla, READ_WRITE true);
+----
+read-only
+
+# And the refusal reads the STATEMENT'S options, not the session's access_mode.
+# options.access_mode is seeded from DBConfig and only overwritten when the
+# statement carried one of these keys, so a database opened with
+# access_mode=read_write made a plain `ATTACH ... (TYPE xmla)` fail while naming
+# an option the user never wrote. That configuration cannot be reached from SQL
+# — `SET access_mode` is refused after startup — so it is asserted through the C
+# API instead; these two cases pin the half that IS reachable.
+statement ok
+ATTACH 'host=example.invalid port=2383' AS ro5 (TYPE xmla, READ_ONLY true);
+
+statement ok
+ATTACH 'host=example.invalid port=2383' AS ro6 (TYPE xmla, READ_WRITE false);
+
+query I
+SELECT count(*) FROM duckdb_databases() WHERE database_name IN ('ro5', 'ro6') AND readonly;
+----
+2
+
+statement ok
+DETACH ro5;
+
+statement ok
+DETACH ro6;
+
+# An unknown ATTACH option is refused rather than ignored.
+statement error
+ATTACH 'host=example.invalid port=2383' AS ro2 (TYPE xmla, NONSENSE 'x');
+----
+unknown ATTACH option
+
+# A missing port is reported at ATTACH, not deferred to the first query.
+statement error
+ATTACH 'host=example.invalid' AS ro3 (TYPE xmla);
+----
+port is required
+
+# A named secret that does not exist is reported at ATTACH too.
+statement error
+ATTACH 'host=example.invalid port=2383 secret=absent' AS ro4 (TYPE xmla);
+----
+not found
+
+# T-037. DDL is refused before any network contact: this runs against an
+# unresolvable host and produces a read-only refusal rather than a connection
+# error.
+#
+# The message is DuckDB's, not the extension's, and that is the improvement:
+# now that SetReadOnlyDatabase() marks the attachment, DuckDB's own guard fires
+# before the catalog is reached. The catalog's own refusals remain — they are
+# what covers a path DuckDB does not guard, and what made this an error at all
+# while the attachment was still reporting read-write.
+statement error
+CREATE SCHEMA ro.newschema;
+----
+attached in read-only mode
+
+# TABLE-level DDL cannot be asserted server-free, and it is worth being precise
+# about why rather than writing a test that accepts any failure.
+#
+# `CREATE TABLE ro.main.t` must first RESOLVE the schema `main`, and resolving a
+# schema means fetching DBSCHEMA_CATALOGS — so against an unreachable host the
+# connection fails before EITHER guard is reached. `CREATE SCHEMA` above needs
+# no such lookup, which is why it reaches DuckDB's read-only guard and this does
+# not. Against a reachable instance this gets the read-only refusal; that path
+# is exercised by the live probe, not here.
+#
+# The guarantee does not depend on which error arrives: the extension contains no
+# path that writes, and the catalog's PlanInsert/PlanUpdate/PlanDelete/
+# PlanCreateTableAs/BindCreateIndex overrides all refuse unconditionally.
+statement error
+CREATE TABLE ro.main.t (i INTEGER);
+----
+could not resolve the instance address
+
+statement ok
+DETACH ro;
+
+# --- the secret -> params merge, on the HIT path ------------------------------
+#
+# Everything above about secrets tests the MISS: a name that does not resolve, a
+# field that is not declared, a password that does not appear in the printed
+# form. None of it proves a field that IS present actually reaches the
+# parameters, and that path has broken twice — once because the default was
+# applied before the secret and beat it, once because the port was taken with a
+# bare cast instead of ParsePort.
+#
+# Each case below is server-free because it names a fact that is decided before
+# the socket: validation, or the mechanism/SPN checks in GssContext::Create.
+
+statement ok
+CREATE SECRET target (TYPE xmla, HOST 'example.invalid', PORT 2383);
+
+# Host and port BOTH come from the secret. A miss on either is loud and
+# different: "host is required" or "port is required". Getting as far as address
+# resolution is the proof.
+statement error
+SELECT * FROM xmla_discover('secret=target', 'DBSCHEMA_CATALOGS');
+----
+could not resolve the instance address
+
+# ATTACH resolves the same way, so a secret is enough to attach with.
+statement ok
+ATTACH 'secret=target' AS viasecret (TYPE xmla);
+
+statement ok
+DETACH viasecret;
+
+# The port alone, with the host in the connection string.
+statement ok
+CREATE SECRET portonly (TYPE xmla, PORT 2383);
+
+statement error
+SELECT * FROM xmla_discover('host=example.invalid secret=portonly', 'DBSCHEMA_CATALOGS');
+----
+could not resolve the instance address
+
+# A secret's port goes through ParsePort, exactly as a connection string's does.
+# This was a bare static_cast<uint16_t>, so PORT 65538 became port 2 and the
+# connection went somewhere the caller never named.
+statement ok
+CREATE SECRET badport (TYPE xmla, HOST 'example.invalid', PORT 65538);
+
+statement error
+SELECT * FROM xmla_discover('secret=badport', 'DBSCHEMA_CATALOGS');
+----
+port must be a number in 1..65535
+
+# The connection string still wins over the secret, so an out-of-range secret
+# port is not even consulted when one is given explicitly.
+statement error
+SELECT * FROM xmla_discover('port=2383 secret=badport', 'DBSCHEMA_CATALOGS');
+----
+could not resolve the instance address
+
+# The mechanism reaches the credential. This is the field whose merge broke:
+# `mechanism` defaulted to "kerberos" at construction, so "non-empty wins" made
+# the DEFAULT beat the secret and a secret asking for NTLM was ignored.
+statement ok
+CREATE SECRET badmech (TYPE xmla, HOST 'example.invalid', PORT 2383, MECHANISM 'bogus');
+
+statement error
+SELECT * FROM xmla_discover('secret=badmech', 'DBSCHEMA_CATALOGS');
+----
+unknown mechanism
+
+# ... and the connection string still wins over it, which is the other half of
+# that same bug: this must NOT report an unknown mechanism.
+statement error
+SELECT * FROM xmla_discover('mechanism=ntlm secret=badmech', 'DBSCHEMA_CATALOGS');
+----
+could not resolve the instance address
+
+# The SPN override reaches the credential too.
+statement ok
+CREATE SECRET badspn (TYPE xmla, HOST 'example.invalid', PORT 2383, MECHANISM 'ntlm', SPN 'noslash');
+
+statement error
+SELECT * FROM xmla_discover('secret=badspn', 'DBSCHEMA_CATALOGS');
+----
+spn must be of the form
+
+# `user` and `password` have no server-free observable — proving they arrived
+# means watching what the security layer sends — so they are covered by the live
+# probe rather than by a test here that would only assert they are not rejected.
+
+# A secret of the WRONG TYPE is refused by name.
+#
+# The sibling half of the port fix above, and the same shape of mistake:
+# SecretManager::GetSecretByName does not filter by type, so `secret=<an s3 or
+# http secret>` was accepted, every TryGetValue missed, and the connection
+# proceeded with no user, no password and the Kerberos default — presenting as
+# an authentication failure rather than as the naming mistake it is.
+#
+# `http` is a core secret type, registered with no extension loaded, so this
+# needs nothing beyond DuckDB itself.
+statement ok
+CREATE SECRET notxmla (TYPE http, BEARER_TOKEN 'x');
+
+statement error
+SELECT * FROM xmla_discover('secret=notxmla', 'DBSCHEMA_CATALOGS');
+----
+not 'xmla'
+
+# --- the option parsers ------------------------------------------------------
+
+# An unrecognised boolean is an error, not a silent false. `use_port` selects
+# between two different SPNs, so `use_port=flase` quietly meaning false presents
+# as a Kerberos failure with no hint at the cause.
+statement error
+SELECT * FROM xmla_discover('host=example.invalid port=2383 use_port=flase', 'DBSCHEMA_CATALOGS');
+----
+must be true or false
+
+# ... and the message names the OPTION, not the value the caller wrote: a
+# connection string's contents reach the query log (constitution I), which is the
+# same reason the malformed-string case above asserts no echo.
+statement error
+SELECT * FROM xmla_discover('host=example.invalid port=2383 use_port=flase', 'DBSCHEMA_CATALOGS');
+----
+use_port must be true or false
+
+# A timeout needs an UPPER bound as well as a lower one. `!(parsed > 0)` alone
+# accepts `inf` — strtod consumes the whole string — and any finite monster like
+# 1e300. Both reach SocketChannel, where `static_cast<time_t>(seconds)` and
+# `static_cast<long long>(seconds * 1000)` are undefined behaviour outside the
+# target's range.
+statement error
+SELECT * FROM xmla_discover('host=example.invalid port=2383 timeout=inf', 'DBSCHEMA_CATALOGS');
+----
+at most 86400
+
+statement error
+SELECT * FROM xmla_discover('host=example.invalid port=2383 timeout=1e300', 'DBSCHEMA_CATALOGS');
+----
+at most 86400
+
+# The lower bound still holds, and so does a legitimate value: the ceiling must
+# not have replaced the floor.
+statement error
+SELECT * FROM xmla_discover('host=example.invalid port=2383 timeout=0', 'DBSCHEMA_CATALOGS');
+----
+positive number of seconds
+
+statement error
+SELECT * FROM xmla_discover('host=example.invalid port=2383 timeout=5', 'DBSCHEMA_CATALOGS');
+----
+could not resolve the instance address

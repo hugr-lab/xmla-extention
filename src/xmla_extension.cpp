@@ -2,18 +2,24 @@
 
 #include "duckdb.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
+#include "xmla_functions.hpp"
+#include "xmla_secret.hpp"
+#include "xmla_storage.hpp"
 
 namespace duckdb {
 
-//! Registers nothing yet, on purpose.
-//!
-//! T-001 is the skeleton: it exists so that LOAD works, the version is
-//! reportable, and the DuckDB build, the community-extension metadata and the
-//! CI matrix can all be exercised before any surface depends on them. The
-//! table functions and the ATTACH path land in T-034..T-037, above the protocol
-//! layer that already speaks to a live instance.
 static void LoadInternal(ExtensionLoader &loader) {
-	(void)loader;
+	// A credential must not travel in a connection string: that string reaches
+	// the query log, the plan, and any error echoing the statement.
+	RegisterXmlaSecretType(loader);
+	// xmla_discover and xmla_execute. Together these already exceed the
+	// Windows-only msolap extension, which offers one function and no way to
+	// ask for metadata at all.
+	RegisterXmlaFunctions(loader);
+	// ATTACH ... (TYPE xmla): the instance's catalogs become schemas and their
+	// tables become tables, which is what makes SHOW ALL TABLES and DESCRIBE
+	// work without this extension implementing either.
+	RegisterXmlaStorage(loader);
 }
 
 void XmlaExtension::Load(ExtensionLoader &loader) {

@@ -69,8 +69,13 @@ echo "clang-format-14 over $count file(s)"
 
 status=0
 if [ "$MODE" = "--fix" ]; then
+    # `|| status=$?` so the chown ALWAYS runs. clang-format returns non-zero
+    # after a parse failure on one file having already rewritten others, and
+    # under `set -e` the script would abort before the chown — leaving those
+    # rewritten files owned by root in a Linux contributor's working tree, which
+    # is the exact situation the uid/gid hand-off exists to prevent.
     find src test tools \( -name '*.cpp' -o -name '*.hpp' \) -print0 \
-        | xargs -0 -r clang-format-14 -i
+        | xargs -0 -r clang-format-14 -i || status=$?
     chown -R "$HOST_UID:$HOST_GID" src test tools
 else
     find src test tools \( -name '*.cpp' -o -name '*.hpp' \) -print0 \

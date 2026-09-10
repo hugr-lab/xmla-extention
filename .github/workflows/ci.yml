@@ -31,23 +31,14 @@ jobs:
           # CHECKED OUT, not built.
           submodules: recursive
 
+      # Delegates to the script rather than repeating the find expression, the
+      # zero-file guard and the --Werror invocation. They existed in both places,
+      # which defeated the point of extracting the script: a change to the file
+      # set (a fourth directory, a .cc extension) would have applied to one copy
+      # and not the other, and local `make check` and CI would disagree without
+      # either failing.
       - name: clang-format
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y clang-format-14
-          # -print0/-0 for paths with spaces; -r so an empty list does not invoke
-          # clang-format with no arguments, where it reads the already-drained
-          # stdin and exits 0 -- a green lint that checked nothing, which is the
-          # same failure the leak gate and check_layering.sh both refuse.
-          # The count guard is what actually catches a directory rename.
-          count=$(find src test tools \( -name '*.cpp' -o -name '*.hpp' \) -print | grep -c '')
-          echo "formatting $count file(s)"
-          if [ "$count" -eq 0 ]; then
-            echo "found 0 sources to format -- the file list is broken, which is not a pass" >&2
-            exit 1
-          fi
-          find src test tools \( -name '*.cpp' -o -name '*.hpp' \) -print0 \
-            | xargs -0 -r clang-format-14 --dry-run --Werror
+        run: scripts/ci/clang_format.sh --check
 
       # Constitution I. The gate runs on every commit locally; here it runs over
       # EVERY TRACKED FILE, not just a diff, so a token that arrived before the
@@ -131,6 +122,24 @@ jobs:
       # contacted an Analysis Services instance. Nothing here reaches a network.
       - name: Hermetic protocol tests
         run: ./build/xmla_test
+
+  # The SQL surface. Needs the extension BUILT, which the unit-test jobs do not
+  # do — they build only the hermetic protocol suite. Every case here is
+  # server-free (constitution III); anything needing a live instance is the
+  # probe's job.
+  sql-tests:
+    name: SQL surface (sqllogictest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+      - run: sudo apt-get update && sudo apt-get install -y libkrb5-dev gss-ntlmssp ninja-build
+      # Bounded parallelism: DuckDB's larger translation units get the compiler
+      # OOM-killed on a standard runner at full width.
+      - run: GEN=ninja CMAKE_BUILD_PARALLEL_LEVEL=2 make release
+      - run: ./build/release/test/unittest "test/sql/*"
 
   sanitizers:
     name: ASan + UBSan

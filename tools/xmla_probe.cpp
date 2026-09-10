@@ -55,15 +55,12 @@ void PrintRowset(const Scrubber &scrub, const char *label, const Rowset &rs, siz
 		std::printf(" ... (+%zu)", rs.columns.size() - 12);
 	}
 	std::printf("\n");
-	for (size_t r = 0; r < rs.rows.size() && r < max_rows; r++) {
+	for (size_t r = 0; r < rs.size() && r < max_rows; r++) {
 		std::printf("  row %zu:", r);
 		size_t shown = 0;
-		for (const auto &col : rs.columns) {
-			const auto it = rs.rows[r].find(col);
-			if (it == rs.rows[r].end()) {
-				continue;
-			}
-			std::printf(" %s=%s", col.c_str(), scrub(it->second).c_str());
+		const auto row = rs.Row(r);
+		for (const auto *cell = row.begin(); cell != row.end(); ++cell) {
+			std::printf(" %s=%s", rs.columns[cell->column].c_str(), scrub(cell->value).c_str());
 			if (++shown >= 4) {
 				break;
 			}

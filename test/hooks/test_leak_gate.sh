@@ -247,12 +247,16 @@ absent_sha=0123456789abcdef0123456789abcdef01234567
 # Checked: if update-index ever fails (a git version that validates the object,
 # a verify_path rejection) the index stays empty, the gate exits 0 on an empty
 # list, and the case reports ok having tested nothing.
-if ! git -C "$SANDBOX" update-index --add --cacheinfo "160000,$absent_sha,vendored" 2>/dev/null; then
+if git -C "$SANDBOX" update-index --add --cacheinfo "160000,$absent_sha,vendored" 2>/dev/null; then
+    run_gate
+    report "a submodule gitlink is skipped, not refused as unreadable" "$gate_verdict" "PASS"
+else
+    # No fall-through. Reporting the FAIL and then running the case anyway
+    # produced an "ok" line for a gate that scanned an empty index — the
+    # misleading pass this suite exists to eliminate.
     echo "  FAIL  could not create the gitlink fixture; the submodule case tested nothing"
     fail=$((fail + 1))
 fi
-run_gate
-report "a submodule gitlink is skipped, not refused as unreadable" "$gate_verdict" "PASS"
 git -C "$SANDBOX" update-index --force-remove vendored 2>/dev/null
 
 assert_index_clean "submodules"

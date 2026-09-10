@@ -12,9 +12,12 @@
 #include "xmla/seal_provider.hpp"
 #include "xmla/transport.hpp"
 
+#include "xmla/sealing.hpp"
+
 #include <map>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace xmla {
 
@@ -42,6 +45,68 @@ struct NegotiatedTerms {
 };
 
 enum class State { UNCONNECTED, NEGOTIATED, AUTHENTICATED, CLOSED, FAILED };
+
+class Session;
+
+//! A forward-only cursor over one response's rows, decoded as they arrive.
+//!
+//! The point is EARLY TERMINATION. `SELECT ... LIMIT 5` from a fact table cannot
+//! be expressed as a DAX clause, because DuckDB v2.0 passes no limit to a table
+//! function at all - TableFunctionInitInput carries the projection, the filters
+//! and the sample options, and there is no field for a limit - so a scan cannot
+//! know to ask for five rows. What it CAN do is stop reading. Destroying a cursor
+//! before it is drained abandons the rest of the response instead of draining it,
+//! so the bytes still on the server's side are never transferred.
+//!
+//! The cursor borrows its Session and must not outlive it. It leaves the session
+//! unusable if abandoned part-way, deliberately: half a DIME message has been
+//! read off the socket and there is no way back to a record boundary.
+class RowCursor {
+public:
+	~RowCursor();
+	RowCursor(const RowCursor &) = delete;
+	RowCursor &operator=(const RowCursor &) = delete;
+
+	//! Pull the next row. False means the response is exhausted.
+	bool Next(std::vector<Cell> &out);
+
+	//! The column union DISCOVERED SO FAR, which grows as rows arrive.
+	//!
+	//! A streaming caller therefore cannot resolve a name to an index once and
+	//! be done: a column that is null in every row read so far is not in this
+	//! list yet. Map cell.column through this list per row, extending the mapping
+	//! when it grows - do not probe the first row for a schema. Probing the first
+	//! row is exactly the bug that made a whole scan return NULL, twice.
+	const std::vector<std::string> &columns() const;
+
+	//! True once the last record of the response has been read. A cursor
+	//! destroyed while this is false abandons the connection.
+	bool complete() const {
+		return complete_;
+	}
+
+private:
+	friend class Session;
+	explicit RowCursor(Session &session);
+
+	//! Read one DIME record, unseal it, and feed the parser.
+	void Pump();
+	void Feed(const Bytes &plain);
+	void CheckHead();
+
+	Session &session_;
+	std::unique_ptr<sealing::Unsealer> unsealer_;
+	RowStreamParser parser_;
+
+	//! The plaintext prefix, for the checks that need a document rather than a
+	//! row: is this XML at all, is it a fault, what is the SessionId. Bounded,
+	//! because it exists to inspect a header and not to buffer a rowset.
+	std::string head_;
+	static const size_t HEAD_LIMIT = 64 * 1024;
+	bool head_checked_ = false;
+	bool complete_ = false;
+	bool drained_ = false;
+};
 
 //! An authenticated conversation with an instance.
 class Session {
@@ -85,6 +150,13 @@ public:
 	//! read-only permissions on the server.
 	Rowset Execute(const std::string &statement, const std::string &catalog = std::string());
 
+	//! Execute, and stream the rows back instead of materialising them.
+	//!
+	//! Same read-only validation as Execute - the guard is on the statement, so
+	//! it does not care how the answer is read. The returned cursor borrows this
+	//! session; destroy it first.
+	std::unique_ptr<RowCursor> ExecuteCursor(const std::string &statement, const std::string &catalog = std::string());
+
 	State state() const {
 		return state_;
 	}
@@ -95,7 +167,10 @@ public:
 	std::string SealDescription() const;
 
 private:
+	friend class RowCursor;
 	void RequireAuthenticated() const;
+	//! Send a request and leave the response unread, for a streaming caller.
+	void SendRequest(const std::string &payload);
 	std::string SendAuthenticate(const std::string &token_b64);
 	Rowset RoundtripRowset(const std::string &payload);
 	void CaptureSessionId(const std::string &text);

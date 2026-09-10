@@ -11,24 +11,100 @@
 //===----------------------------------------------------------------------===//
 #pragma once
 
+#include <cstdint>
 #include <map>
 #include <string>
 #include <vector>
 
 namespace xmla {
 
+//! One column's value in one row.
+struct Cell {
+	//! Index into the owning Rowset's or parser's column list.
+	uint32_t column = 0;
+	std::string value;
+};
+
 struct Rowset {
 	//! Column names in first-seen order. XMLA omits null columns from a row, so
 	//! the union across rows is the schema and no single row need carry it.
 	std::vector<std::string> columns;
-	std::vector<std::map<std::string, std::string>> rows;
+
+	//! Every present value, in row-major order, each tagged with its column.
+	//!
+	//! This replaced a std::map<std::string, std::string> per row. A row is
+	//! SPARSE - XMLA omits a null column entirely - so a dense rows x columns
+	//! array would need a validity mask beside it, and the map paid for a
+	//! red-black node and a duplicated column NAME for every value in every row.
+	//! Tagged cells carry absence for free and cost one uint32 per value. On the
+	//! DBSCHEMA_COLUMNS response of a modest model - 1366 rows of ~30 columns -
+	//! that is 40k string keys not allocated.
+	std::vector<Cell> cells;
+
+	//! Row i occupies cells[row_starts[i] .. row_starts[i + 1]).
+	//!
+	//! Always carries a leading 0, so it is never empty and size() needs no
+	//! special case.
+	std::vector<uint32_t> row_starts = {0};
+
+	//! Returned by ColumnIndex for a name that is not in `columns`.
+	static const size_t NO_COLUMN = static_cast<size_t>(-1);
 
 	size_t size() const {
-		return rows.size();
+		return row_starts.size() - 1;
 	}
 	bool empty() const {
-		return rows.empty();
+		return size() == 0;
 	}
+
+	//! Index of a column by name, or NO_COLUMN.
+	//!
+	//! Linear. A rowset has tens of columns, not thousands, and the scan path
+	//! resolves an index ONCE per query rather than once per row - which is the
+	//! whole reason the per-row map went away.
+	size_t ColumnIndex(const std::string &name) const;
+
+	//! A borrowed view of one row's cells. Cheap to copy; does not own anything.
+	class RowView {
+	public:
+		RowView(const Cell *begin, const Cell *end, const std::vector<std::string> *columns)
+			: begin_(begin), end_(end), columns_(columns) {}
+
+		const Cell *begin() const {
+			return begin_;
+		}
+		const Cell *end() const {
+			return end_;
+		}
+		size_t size() const {
+			return static_cast<size_t>(end_ - begin_);
+		}
+
+		//! nullptr when the column is not present IN THIS ROW, which is distinct
+		//! from present-and-empty: XMLA sends `<D/>` for the empty string and
+		//! omits the element entirely for null.
+		const std::string *Find(const std::string &name) const;
+		//! The same, by column index - for a caller that resolved the index once.
+		const std::string *FindIndex(size_t column) const;
+		//! Throws std::out_of_range when absent, like std::map::at.
+		const std::string &At(const std::string &name) const;
+		bool Has(const std::string &name) const {
+			return Find(name) != nullptr;
+		}
+
+	private:
+		const Cell *begin_;
+		const Cell *end_;
+		const std::vector<std::string> *columns_;
+	};
+
+	//! Row `i`. Out of range yields an empty view rather than undefined
+	//! behaviour: these indices are derived from a peer's byte stream.
+	RowView Row(size_t i) const;
+
+	//! Append one row's cells. The cells' column indices must already refer to
+	//! `columns`.
+	void AppendRow(std::vector<Cell> &&row);
 };
 
 struct Fault {
@@ -37,7 +113,119 @@ struct Fault {
 	std::string message;
 };
 
-//! Parse an XMLA rowset response. Matches on LOCAL element names, so the
+//! A resumable, row-at-a-time scanner over a rowset document.
+//!
+//! Bytes go in through Append as they arrive; whole rows come out through Next.
+//! Nothing waits for the end of the document, which is what lets a scan stop
+//! reading a fact table after the rows it was asked for (T-042).
+//!
+//! ParseRowset is implemented ON THIS rather than beside it. Two scanners over
+//! the same grammar would drift, and this one is a fuzz target: keeping a single
+//! implementation means every existing rowset test also covers the streaming
+//! path, and a divergence is a test failure rather than a difference only the
+//! streaming caller sees.
+class RowStreamParser {
+public:
+	void Append(const char *data, size_t size);
+	void Append(const std::string &chunk) {
+		Append(chunk.data(), chunk.size());
+	}
+
+	//! No more bytes will arrive. Next() then drains what is buffered.
+	void Finish() {
+		finished_ = true;
+	}
+
+	//! Pull the next complete row into `out`.
+	//!
+	//! False means "not yet" before Finish() and "no more" after it. The caller
+	//! distinguishes them; this class does not guess.
+	bool Next(std::vector<Cell> &out);
+
+	//! The column union discovered SO FAR. It grows as rows arrive, because a
+	//! column that is null in every row up to here has not been seen yet.
+	const std::vector<std::string> &columns() const {
+		return columns_;
+	}
+
+	//! Bytes held but not yet consumed. A caller that feeds from a socket uses
+	//! this to bound what an unterminated document can accumulate.
+	size_t buffered() const {
+		return buffer_.size() - pos_;
+	}
+
+private:
+	uint32_t ColumnFor(const std::string &name);
+	void SetCell(uint32_t column, std::string value);
+	void Compact();
+
+	std::string buffer_;
+	size_t pos_ = 0;
+	bool finished_ = false;
+
+	// Scanner state, carried across Append/Next calls.
+	int depth_ = 0;
+	int row_depth_ = -1;
+	std::string pending_field_;
+	size_t pending_from_ = 0;
+
+	std::vector<std::string> columns_;
+	std::vector<Cell> row_;
+};
+
+//! Map the column names a response actually carries onto the columns a caller
+//! asked for.
+//!
+//! This lives in the protocol layer, with no DuckDB in sight, for one reason:
+//! the equivalent logic has been written wrong TWICE in the scan and both times
+//! the symptom was a column of NULL rather than an error. It was unreachable
+//! from the hermetic suite while it sat in the extension's translation unit, so
+//! the only thing exercising it was a live probe that does not run in CI. It is
+//! pure — names in, positions out — so there was never a reason for it to be
+//! there.
+//!
+//! Three name forms are accepted for each requested column, because which one
+//! comes back depends on the query that produced the rowset:
+//!
+//!   `Colour`             a DISCOVER or DBSCHEMA rowset carries bare names
+//!   `DimProduct[Colour]` `EVALUATE 'DimProduct'` qualifies its result columns
+//!   `[Colour]`           an aliased DAX projection returns the alias, which
+//!                        SSAS encodes as `_x005B_Colour_x005D_`
+//!
+//! Accepting all three is deliberate. Committing to one and being wrong does not
+//! fail loudly; it silently returns nulls.
+class ColumnMap {
+public:
+	//! Returned for a column no caller asked for.
+	static const int64_t NO_OUTPUT = -1;
+
+	ColumnMap() = default;
+	ColumnMap(const std::string &table, const std::vector<std::string> &requested);
+
+	//! Extend the mapping to cover every name in `discovered`.
+	//!
+	//! Cheap to call per row, and it MUST be: a rowset's column list grows as
+	//! rows arrive, because a column that is null in every row so far has not
+	//! been seen yet. Resolving once against the first row is the bug this
+	//! class exists to make testable.
+	void Extend(const std::vector<std::string> &discovered);
+
+	//! Output position for the discovered column at `index`, or NO_OUTPUT.
+	int64_t OutputFor(size_t index) const {
+		return index < mapping_.size() ? mapping_[index] : NO_OUTPUT;
+	}
+
+	//! How many discovered columns have been mapped so far.
+	size_t size() const {
+		return mapping_.size();
+	}
+
+private:
+	std::map<std::string, int64_t> keys_;
+	std::vector<int64_t> mapping_;
+};
+
+//! Parse a complete XMLA rowset response. Matches on LOCAL element names, so the
 //! default `...:rowset` namespace needs no special handling.
 Rowset ParseRowset(const std::string &text);
 

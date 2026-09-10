@@ -25,11 +25,32 @@ misdescribe an implementation that uses no provider at all.
 INSTALL xmla FROM community;
 LOAD xmla;
 
-ATTACH 'host=ssas-host port=2383' AS aw (TYPE xmla);
+CREATE SECRET ssas (TYPE xmla, MECHANISM 'ntlm', USER 'reader', PASSWORD '...');
+ATTACH 'host=ssas-host port=2383 secret=ssas' AS aw (TYPE xmla);
 
 SHOW ALL TABLES;
-SELECT * FROM aw.model."Internet Sales" LIMIT 10;
+DESCRIBE aw."Adventure Works".DimProduct;
+
+-- and the point of the whole thing: SSAS joined to local data
+SELECT p.EnglishProductName, local.note
+FROM aw."Adventure Works".DimProduct p
+JOIN local_notes local ON p.ProductKey = local.k;
 ```
+
+Without `ATTACH`, for metadata and ad-hoc DAX/MDX:
+
+```sql
+SELECT CUBE_NAME, CUBE_TYPE
+FROM xmla_discover('host=ssas-host port=2383 secret=ssas', 'MDSCHEMA_CUBES');
+
+SELECT * FROM xmla_execute('host=ssas-host port=2383 secret=ssas',
+                           'EVALUATE TOPN(10, Sales)');
+```
+
+`MDSCHEMA_CUBES` is "show all cubes"; `MDSCHEMA_MEASURES`, `MDSCHEMA_DIMENSIONS`
+and `DBSCHEMA_COLUMNS` are the describe surface. `DESCRIBE` and `SHOW ALL TABLES`
+work on an attached catalog because its schemas are the instance's models and its
+tables are their tables — the extension implements neither command.
 
 The mascot is a **lesser scaup**: a diving duck, because drilling into a cube is diving, not
 dabbling. The current mark is a hand-authored placeholder and looks it — replacing it with a
@@ -40,14 +61,24 @@ real illustration is a welcome first contribution. Nothing depends on the file.
 | | |
 |---|---|
 | NTLM, end to end | **works**, verified against SQL Server 2022 on tabular and multidimensional instances |
+| `ATTACH`, `SHOW ALL TABLES`, `DESCRIBE`, `SELECT` | **works** on a tabular model |
+| Projection pushdown | **works** — a narrow `SELECT` sends a DAX `SELECTCOLUMNS` list, not the whole table |
+| `LIMIT` | **works** by stopping the read, not by a DAX clause; DuckDB passes no limit to a scan |
+| Filter pushdown | not done — DAX refuses a text literal against a numeric column, and no non-admin rowset says which columns those are (research D14) |
+| `SELECT` on a multidimensional model | not supported — row scans need DAX `EVALUATE`; use `xmla_execute` with MDX |
 | Kerberos | **unverified against a live server** — see below |
 | Linux | supported |
-| macOS | needs MIT krb5 (`brew install krb5`); Apple's GSS.framework cannot seal |
+| macOS | **local build only** — needs MIT krb5 (`brew install krb5`); Apple's GSS.framework cannot seal |
 | Windows | not a target — you already have `msolap` |
 
 Discovery, catalog listing and metadata retrieval complete over NTLM. `DBSCHEMA_COLUMNS`
 returns 1366 rows on the test model, which is past the sealed-frame, DIME-chunking and
 TCP-fragmentation thresholds all at once — the case that breaks naive implementations.
+
+A scan streams: the protocol layer hands back a cursor, so rows are decoded as records arrive
+and a query that stops asking stops the transfer. Measured on a 60398-row fact table with
+three columns — `SELECT *` over the whole table 37.07 s, one column over the whole table
+2.22 s, `SELECT * ... LIMIT 5` 0.27 s.
 
 **Kerberos is expected to work.** The mechanism-level questions are settled against a real MIT
 KDC in CI: `gss_wrap_iov` produces the frame's layout, pads for none of the four AES session-key
@@ -66,6 +97,19 @@ machine whose SSAS can only speak NTLM. It is marked UNVERIFIED rather than clai
   Homebrew). It is the only native dependency — sealing is done by the security context, so
   there is no TLS library involved.
 - **`gss-ntlmssp`** if you need NTLM.
+
+On **macOS** that means `brew install krb5` followed by
+`PKG_CONFIG_PATH=$(brew --prefix krb5)/lib/pkgconfig`. Apple's GSS.framework is not an
+option: it declares the IOV types and exports neither `gss_wrap_iov` nor `gss_unwrap_iov`,
+and ships no NTLM mechanism, so it cannot seal a message at all.
+
+A macOS build is a **local build**, not a redistributable one. Homebrew's krb5 is keg-only
+and ships no static archives, so the extension links the dylibs and records their install
+names verbatim — `otool -L` on the result shows
+`/opt/homebrew/opt/krb5/lib/libgssapi_krb5.2.2.dylib`. The artifact therefore loads only
+where that prefix is populated, which is why macOS is in `excluded_platforms` in
+`description.yml` rather than published to the community registry. Linux builds have no such
+constraint: krb5 is on the default library path there and the plain library name is used.
 
 ## Credentials
 
@@ -122,7 +166,7 @@ Everything CI enforces, before pushing:
 make check
 ```
 
-`make format` reformats with the **same clang-format CI pins** (14, via a
+`make fmt` reformats with the **same clang-format CI pins** (14, via a
 container). Newer versions disagree with it, so formatting with whatever is on
 your machine can produce a diff that only fails once pushed.
 
