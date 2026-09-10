@@ -1,0 +1,62 @@
+name: Deploy docs
+
+# Publishes website/ to GitHub Pages at https://hugr-lab.github.io/xmla-extention/
+#
+# The docs build from MAIN, and Docusaurus VERSIONING keeps released content
+# authoritative once the first snapshot exists: `docs:version <X.Y.Z>` snapshots
+# docs/ into versioned_docs/, which then serves at the ROOT as the default while
+# the live docs/ tree publishes as "Next" under /next/ with an unreleased banner.
+# Until that first snapshot, docs/ serves at the root. Same scheme as
+# hugr-lab/mssql-ducklake, whose site this one mirrors.
+
+on:
+  release:
+    types: [published]
+  push:
+    branches: [main]
+    paths:
+      - "website/**"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      # No submodules: the site is markdown and needs neither duckdb nor
+      # extension-ci-tools, and checking them out costs minutes.
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: website/package-lock.json
+
+      - name: Build the docs site
+        working-directory: website
+        run: |
+          npm ci
+          npx docusaurus build
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: website/build
+
+      - id: deployment
+        uses: actions/deploy-pages@v4

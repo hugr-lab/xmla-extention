@@ -3,6 +3,10 @@
 A DuckDB extension that reads SQL Server Analysis Services over the **native XMLA/TCP
 binding**, from Linux, with no IIS, no COM and no Windows components.
 
+This file is the layer-level tour, aimed at someone changing the code. The
+user-facing documentation is the site at
+<https://hugr-lab.github.io/xmla-extention/>, built from `website/`.
+
 ## Why this exists
 
 SSAS speaks XMLA over two bindings: HTTP through the `msmdpump` ISAPI extension hosted in
