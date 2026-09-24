@@ -1,7 +1,9 @@
 {
-  "$comment-dependencies": "Deliberately empty. The only native dependency is MIT krb5, which is a system library discovered through pkg-config rather than a vcpkg port: sealing is done by the negotiated GSS security context, so there is no TLS library here and none may be added for that purpose (constitution, Security & Data-Handling Constraints). The manifest exists because the DuckDB extension CI tooling expects one.",
+  "$comment-dependencies": "krb5 is declared here for ONE consumer: the community-extensions registry, which builds through vcpkg and has no system krb5 and no way to apt-install one. Local and CI builds discover the system library through pkg-config and ignore this manifest, so the declaration costs them nothing. It was deliberately empty before, on the reasoning that krb5 is a system library - true everywhere except the one place that has to build this from a clean container. Nothing else belongs here: sealing is done by the negotiated GSS security context, so there is no TLS library and none may be added for that purpose (constitution, Security & Data-Handling Constraints).",
   "name": "xmla-extension",
   "version": "0.0.1",
   "description": "DuckDB extension for SQL Server Analysis Services over the native XMLA/TCP binding",
-  "dependencies": []
+  "dependencies": [
+    "krb5"
+  ]
 }
