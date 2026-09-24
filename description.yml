@@ -31,12 +31,14 @@ repo:
   # object, so a published build is reproducible. A branch name is silently
   # accepted here and rejected by the registry's own validation.
   #
-  # This is the merge of PR #10 on main. It necessarily TRAILS this file by at
-  # least one commit — the ref names the tree to build, and the file naming it
-  # is submitted to duckdb/community-extensions rather than read from here — so
-  # re-pin it to the current tip of main immediately before each submission, and
-  # confirm the object is on main: `git branch -r --contains <sha>`.
-  ref: "31d10d8d65f97d8eb96573ae01cf8ff7b46704aa"
+  # This is the merge of PR #13 on main — the first tree whose vcpkg.json
+  # declares krb5, which the registry's vcpkg build needs. It necessarily
+  # TRAILS this file by at least one commit — the ref names the tree to build,
+  # and the file naming it is submitted to duckdb/community-extensions rather
+  # than read from here — so re-pin it to the current tip of main immediately
+  # before each submission, and confirm the object is on main:
+  # `git branch -r --contains <sha>`.
+  ref: "368828601de1651f34b8a7d8070ee6221702c95a"
 
 docs:
   hello_world: |
