@@ -20,7 +20,9 @@ causes ODR issues, which is a mistake the neighbouring extension documents havin
 **Primary dependencies**: DuckDB (submodule), `extension-ci-tools` (submodule), and MIT krb5
 (`libgssapi_krb5` + `libkrb5`) on every platform — including macOS (research D11). Nothing
 else.
-`vcpkg.json` exists but declares no packages, because there are none to declare.
+`vcpkg.json` declares krb5 for one consumer only: the community-extensions registry, which
+builds through vcpkg and has no system krb5. Local and CI builds discover the system
+library through pkg-config.
 
 **Storage**: none. The extension holds no state across sessions.
 
@@ -91,7 +93,7 @@ context's job and there is no UTF-16 bulk path.
 CMakeLists.txt              # extension targets; discovers GSSAPI per platform
 extension_config.cmake      # registers the extension with DuckDB's build
 Makefile                    # includes extension-ci-tools/makefiles/duckdb_extension.Makefile
-vcpkg.json                  # declares no packages; present for the CI tooling's benefit
+vcpkg.json                  # declares krb5 for the registry's vcpkg build only
 description.yml             # community-extension metadata
 duckdb/                     # submodule
 extension-ci-tools/         # submodule
