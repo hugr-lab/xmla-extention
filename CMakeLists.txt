@@ -241,7 +241,14 @@ if(COMMAND build_loadable_extension)
     foreach(target ${EXTENSION_NAME} ${LOADABLE_EXTENSION_NAME})
         target_include_directories(${target} PRIVATE src/include ${XMLA_GSS_INCLUDE_DIRS})
         if(XMLA_GSS_FOUND)
-            target_link_libraries(${target} PRIVATE ${XMLA_GSS_LIBRARIES})
+            # PLAIN signature, deliberately. DuckDB's own extension_build_tools.cmake
+            # already calls target_link_libraries on both of these targets with the
+            # plain form (lines 171 and 291), and CMake refuses to mix signatures on
+            # one target: PRIVATE here fails at configure with "All uses of
+            # target_link_libraries with a target must be either all-keyword or
+            # all-plain". Verified in CI, which is the only job that configures the
+            # extension against DuckDB.
+            target_link_libraries(${target} ${XMLA_GSS_LIBRARIES})
         endif()
         target_compile_definitions(${target} PRIVATE XMLA_VERSION="${XMLA_EXTENSION_VERSION}")
     endforeach()
