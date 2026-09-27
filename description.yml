@@ -45,6 +45,31 @@ repo:
   # registry's Linux images at all. Read that probe's README before submitting.
   ref: "873c5fdae1e727ea59e0851b3d34dedba6171fda"
 
+  # The tree the PRERELEASE lane builds, and the only lane that can succeed for
+  # this extension. build_next.yml calls build.yml with
+  # duckdb_version: 'v2.0-cyanoptera' and require_ref_next: true, and
+  # community-extensions/scripts/build.py uses ref_next whenever DUCKDB_VERSION
+  # is not DUCKDB_LATEST_STABLE — so without this field that lane sets
+  # extension_ref to None and skips the extension entirely.
+  #
+  # It is a separate field rather than a duplicate of `ref` because the two
+  # lanes build different DuckDB versions from the same repository, and this one
+  # is the version we actually target: .gitmodules pins the duckdb submodule to
+  # branch v2.0-cyanoptera, and the source is v2.0-only (ExtensionLoader,
+  # DUCKDB_CPP_EXTENSION_ENTRY, vector<Identifier>, SetChildCardinality, the
+  # v2.0 StorageExtension/catalog surface). Today both refs name the same
+  # object; they will diverge as soon as main carries a commit that only one
+  # lane should build, which is the point of keeping them distinct.
+  #
+  # The STABLE lane is expected to fail regardless of what is pinned here.
+  # build.yml sets DUCKDB_LATEST_STABLE to v1.5.5 and feeds `ref` to it, and
+  # `ref` is a required field that cannot be omitted, so a v2.0-only extension
+  # is compiled against v1.5.5 headers. Nothing in description.yml opts out of a
+  # DuckDB version — excluded_platforms excludes platforms, not versions — so
+  # this is a property of the registry to raise with it, not something to fix by
+  # changing this file.
+  ref_next: "9053855a05ec11a844b3e602239c94f46de2781b"
+
 docs:
   hello_world: |
     INSTALL xmla FROM community;
