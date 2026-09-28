@@ -27,48 +27,59 @@ extension:
 
 repo:
   github: "hugr-lab/xmla-extention"
-  # An immutable SHA, never a branch name: the registry checks out this exact
-  # object, so a published build is reproducible. A branch name is silently
-  # accepted here and rejected by the registry's own validation.
-  #
-  # This is the merge of PR #16, the current tip of main. It necessarily TRAILS
-  # this file by at least one commit — the ref names the tree to build, and the
-  # file naming it is submitted to duckdb/community-extensions rather than read
-  # from here — so re-pin it to the current tip of main immediately before each
-  # submission, and confirm the object is on main:
-  # `git branch -r --contains <sha>`.
-  #
-  # The tree must contain the krb5 declaration in vcpkg.json, or the registry
-  # build fails at configure on our own "no GSSAPI" refusal. That is not
-  # sufficient, though: test/gss/vcpkg-mech shows a vcpkg-built krb5 ships
-  # without the NTLM mechanism, and the port cannot currently be built on the
-  # registry's Linux images at all. Read that probe's README before submitting.
-  ref: "873c5fdae1e727ea59e0851b3d34dedba6171fda"
 
-  # The tree the PRERELEASE lane builds, and the only lane that can succeed for
-  # this extension. build_next.yml calls build.yml with
-  # duckdb_version: 'v2.0-cyanoptera' and require_ref_next: true, and
-  # community-extensions/scripts/build.py uses ref_next whenever DUCKDB_VERSION
-  # is not DUCKDB_LATEST_STABLE — so without this field that lane sets
-  # extension_ref to None and skips the extension entirely.
+  # TWO pins, and BOTH of these invariants apply to BOTH of them. They are
+  # stated here once rather than in either field's own comment, because stating
+  # them under `ref` alone is how `ref` came to be re-pinned while the pin that
+  # actually builds was left stale.
+  #
+  #   1. An immutable SHA, never a branch name, and it must be on main. The
+  #      registry checks out this exact object so a published build is
+  #      reproducible; a branch name is silently accepted here and rejected by
+  #      the registry's own validation. Confirm with
+  #      `git branch -r --contains <sha>`.
+  #
+  #   2. The tree it names must carry the krb5 declaration in vcpkg.json, or the
+  #      registry build fails at configure on our own "no GSSAPI" refusal.
+  #
+  # Both pins necessarily TRAIL this file by at least one commit: a pin names
+  # the tree to build, and the file naming it is submitted to
+  # duckdb/community-extensions rather than read from here, so neither can name
+  # the commit that sets it. Re-pin BOTH to the current tip of main immediately
+  # before each submission. scripts/ci/check_registry_refs.py enforces what can
+  # be checked offline; it cannot know whether a pin is current, only whether it
+  # is real and on main.
+  #
+  # Satisfying both invariants is still not enough to submit:
+  # test/gss/vcpkg-mech shows a vcpkg-built krb5 ships without the NTLM
+  # mechanism, and the port cannot currently be built on the registry's Linux
+  # images at all. Read that probe's README first.
+
+  # The tree the STABLE lane builds. Expected to FAIL whatever is pinned here:
+  # build.yml sets DUCKDB_LATEST_STABLE to v1.5.5 and feeds `ref` to it, and
+  # `ref` is required and cannot be omitted, so a v2.0-only extension is
+  # compiled against v1.5.5 headers. Nothing in description.yml opts out of a
+  # DuckDB version — excluded_platforms excludes platforms, not versions — so
+  # that is a property of the registry to raise with it rather than something to
+  # fix by changing this file.
+  ref: "4c8d2474939ba7161e1cc82d35bf3929029934fc"
+
+  # The tree the PRERELEASE lane builds, and the only lane that can succeed.
+  # build_next.yml calls build.yml with duckdb_version 'v2.0-cyanoptera' and
+  # require_ref_next: true, and community-extensions/scripts/build.py uses
+  # ref_next whenever DUCKDB_VERSION is not DUCKDB_LATEST_STABLE — so without
+  # this field that lane sets extension_ref to None and skips the extension
+  # entirely.
   #
   # It is a separate field rather than a duplicate of `ref` because the two
-  # lanes build different DuckDB versions from the same repository, and this one
-  # is the version we actually target: .gitmodules pins the duckdb submodule to
+  # lanes build different DuckDB versions from the same repository, and this is
+  # the version we actually target: .gitmodules pins the duckdb submodule to
   # branch v2.0-cyanoptera, and the source is v2.0-only (ExtensionLoader,
   # DUCKDB_CPP_EXTENSION_ENTRY, vector<Identifier>, SetChildCardinality, the
-  # v2.0 StorageExtension/catalog surface). Today both refs name the same
-  # object; they will diverge as soon as main carries a commit that only one
-  # lane should build, which is the point of keeping them distinct.
-  #
-  # The STABLE lane is expected to fail regardless of what is pinned here.
-  # build.yml sets DUCKDB_LATEST_STABLE to v1.5.5 and feeds `ref` to it, and
-  # `ref` is a required field that cannot be omitted, so a v2.0-only extension
-  # is compiled against v1.5.5 headers. Nothing in description.yml opts out of a
-  # DuckDB version — excluded_platforms excludes platforms, not versions — so
-  # this is a property of the registry to raise with it, not something to fix by
-  # changing this file.
-  ref_next: "9053855a05ec11a844b3e602239c94f46de2781b"
+  # v2.0 StorageExtension/catalog surface). The two pins hold the same SHA
+  # today; nothing keeps them equal, and they diverge the moment main carries a
+  # commit only one lane should build, which is why they stay distinct fields.
+  ref_next: "4c8d2474939ba7161e1cc82d35bf3929029934fc"
 
 docs:
   hello_world: |

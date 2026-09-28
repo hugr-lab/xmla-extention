@@ -64,6 +64,7 @@ test-protocol:
 check: test-protocol
 	./scripts/ci/check_layering.sh
 	./scripts/ci/check_locale_independence.sh
+	python3 ./scripts/ci/check_registry_refs.py
 	@# `if`, NOT `A && B || C`. The && form SWALLOWS B's failure: when the
 	@# submodule is present and the script exits non-zero, the `||` branch fires,
 	@# echo returns 0, and the recipe line succeeds — so `make check` reported
