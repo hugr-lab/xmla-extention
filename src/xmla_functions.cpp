@@ -59,6 +59,9 @@ void DescribeRowset(const xmla::Rowset &rowset, vector<LogicalType> &types, vect
 XmlaConnectionParams ParamsFrom(TableFunctionBindInput &input) {
 	auto params = XmlaConnectionParams::FromString(StringValue::Get(input.inputs[0]));
 	for (const auto &named : input.named_parameters) {
+		if (named.second.IsNull()) {
+			continue;
+		}
 		const auto key = StringUtil::Lower(named.first.GetIdentifierName());
 		if (key == "catalog") {
 			params.catalog = StringValue::Get(named.second);
@@ -78,7 +81,7 @@ unique_ptr<FunctionData> DiscoverBind(ClientContext &context, TableFunctionBindI
 	std::map<std::string, std::string> restrictions;
 	for (const auto &named : input.named_parameters) {
 		// Identifier compares case-insensitively, which is what we want here.
-		if (!(named.first == Identifier("restrictions"))) {
+		if (!(named.first == Identifier("restrictions")) || named.second.IsNull()) {
 			continue;
 		}
 		// A MAP, so the names are data rather than SQL text. envelopes validates
@@ -207,14 +210,21 @@ void Scan(ClientContext &, TableFunctionInput &data, DataChunk &output) {
 void RegisterXmlaFunctions(ExtensionLoader &loader) {
 	TableFunction discover("xmla_discover", {LogicalType::VARCHAR, LogicalType::VARCHAR}, Scan, DiscoverBind,
 						   InitGlobal);
-	discover.named_parameters["catalog"] = LogicalType::VARCHAR;
-	discover.named_parameters["secret"] = LogicalType::VARCHAR;
-	discover.named_parameters["restrictions"] = LogicalType::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR);
+	// A keyword-only parameter without a default is REQUIRED, so each one gets a
+	// typed NULL. FillNamedDefaults then puts every one of them into
+	// named_parameters on every call, which is why the bind loops above skip
+	// NULL rather than reading presence as "the caller passed it".
+	const auto map_type = LogicalType::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR);
+	discover.GetSignature()
+		.AddKeywordOnly("catalog", LogicalType::VARCHAR, Value(LogicalType::VARCHAR))
+		.AddKeywordOnly("secret", LogicalType::VARCHAR, Value(LogicalType::VARCHAR))
+		.AddKeywordOnly("restrictions", map_type, Value(map_type));
 	loader.RegisterFunction(discover);
 
 	TableFunction execute("xmla_execute", {LogicalType::VARCHAR, LogicalType::VARCHAR}, Scan, ExecuteBind, InitGlobal);
-	execute.named_parameters["catalog"] = LogicalType::VARCHAR;
-	execute.named_parameters["secret"] = LogicalType::VARCHAR;
+	execute.GetSignature()
+		.AddKeywordOnly("catalog", LogicalType::VARCHAR, Value(LogicalType::VARCHAR))
+		.AddKeywordOnly("secret", LogicalType::VARCHAR, Value(LogicalType::VARCHAR));
 	loader.RegisterFunction(execute);
 }
 

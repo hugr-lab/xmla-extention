@@ -62,6 +62,39 @@ SELECT * FROM xmla_discover('port=2383', 'DBSCHEMA_CATALOGS');
 ----
 host is required
 
+# The named parameters bind. On DuckDB 2.0 they are keyword-only signature
+# parameters, and one declared without a default is REQUIRED: every call above
+# that passes none of them failed to bind, with "No function matches", until
+# each was given a typed NULL default. These reach the extension's own checks,
+# which is the proof that binding succeeded.
+statement error
+SELECT * FROM xmla_discover('host=example.invalid', 'DBSCHEMA_CATALOGS', catalog := 'AW', restrictions := MAP {'CATALOG_NAME': 'AW'});
+----
+port is required
+
+statement error
+SELECT * FROM xmla_execute('host=example.invalid', 'EVALUATE x', catalog := 'AW');
+----
+port is required
+
+# The value reaches the bind, not just the signature.
+statement error
+SELECT * FROM xmla_discover('host=example.invalid', 'DBSCHEMA_CATALOGS', secret := 'nosuch');
+----
+secret 'nosuch' not found
+
+# The defaults are NULL and arrive on every call, so an explicit NULL must read
+# as "not passed" rather than as a secret or catalog named by a NULL string.
+statement error
+SELECT * FROM xmla_discover('host=example.invalid', 'DBSCHEMA_CATALOGS', secret := NULL, catalog := NULL, restrictions := NULL);
+----
+port is required
+
+statement error
+SELECT * FROM xmla_discover('host=example.invalid', 'DBSCHEMA_CATALOGS', catalg := 'AW');
+----
+Invalid named parameter
+
 # A port outside range is refused, not silently truncated: atoi would turn 65538
 # into port 2.
 statement error
