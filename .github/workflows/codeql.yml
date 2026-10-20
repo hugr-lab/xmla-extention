@@ -26,10 +26,10 @@ jobs:
       actions: read
       contents: read
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - run: sudo apt-get update && sudo apt-get install -y libkrb5-dev ninja-build
 
-      - uses: github/codeql-action/init@v3
+      - uses: github/codeql-action/init@v4
         with:
           languages: c-cpp
           queries: security-and-quality
@@ -64,4 +64,4 @@ jobs:
       # just quietly stop covering it.
       - run: cmake --build build
 
-      - uses: github/codeql-action/analyze@v3
+      - uses: github/codeql-action/analyze@v4
