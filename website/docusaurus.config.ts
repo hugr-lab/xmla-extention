@@ -8,6 +8,16 @@ import type * as Preset from '@docusaurus/preset-classic';
 // published by this repo's Pages workflow to
 // https://hugr-lab.github.io/xmla-extention/.
 
+// The same docs are built twice: for GitHub Pages (default) and for hugr-lab.com on IONOS (DOCS_TARGET=ionos).
+const ionos = process.env.DOCS_TARGET === 'ionos';
+const site = ionos
+  ? {url: 'https://hugr-lab.com', baseUrl: '/docs/xmla-extention/', home: 'https://hugr-lab.com/', docs: 'https://hugr-lab.com/docs/', impressum: 'https://hugr-lab.com/impressum/', datenschutz: 'https://hugr-lab.com/datenschutz/'}
+  : {url: 'https://hugr-lab.github.io', baseUrl: '/xmla-extention/', home: 'https://hugr-lab.github.io/', docs: 'https://hugr-lab.github.io/', impressum: 'https://hugr-lab.github.io/impressum/', datenschutz: 'https://hugr-lab.github.io/datenschutz/'};
+// While the hugr-lab.com copy exists (DOCS_IONOS on), pages.yml sets DOCS_CANONICAL for
+// the GitHub Pages build: its pages then name the hugr-lab.com copy as canonical
+// (src/theme/SiteMetadata) and it has no sitemap of its own.
+const canonicalBase = ionos ? '' : process.env.DOCS_CANONICAL ?? '';
+
 const config: Config = {
   title: 'xmla',
   tagline:
@@ -19,9 +29,11 @@ const config: Config = {
   // needing one is better than having one.
   favicon: 'img/logo-circle.svg',
 
-  url: 'https://hugr-lab.github.io',
-  baseUrl: '/xmla-extention/',
+  url: site.url,
+  baseUrl: site.baseUrl,
+  baseUrlIssueBanner: false,
   trailingSlash: true,
+  customFields: {docsTarget: ionos ? 'ionos' : 'github', canonicalBase},
 
   organizationName: 'hugr-lab',
   projectName: 'xmla-extention',
@@ -57,6 +69,7 @@ const config: Config = {
           showLastUpdateTime: true,
         },
         blog: false,
+        sitemap: canonicalBase ? false : undefined,
         theme: {
           customCss: './src/css/custom.css',
         },
@@ -68,6 +81,11 @@ const config: Config = {
 
   markdown: {
     mermaid: true,
+    // The hugr-lab.com copy shows no image from another server (its CSP blocks them anyway).
+    preprocessor: ({fileContent}) =>
+      ionos
+        ? fileContent.replace(/\[!\[[^\]]*\]\(https?:\/\/[^)]*\)\]\([^)]*\)|!\[[^\]]*\]\(https?:\/\/[^)]*\)/g, '')
+        : fileContent,
     hooks: {
       onBrokenMarkdownLinks: 'throw',
     },
@@ -101,12 +119,12 @@ const config: Config = {
           label: 'Docs',
         },
         {
-          href: 'https://hugr-lab.github.io/mssql-extension/',
+          href: site.docs + 'mssql-extension/',
           label: 'MSSQL Extension',
           position: 'left',
         },
         {
-          href: 'https://hugr-lab.github.io/',
+          href: site.home,
           label: 'Hugr Lab',
           position: 'right',
         },
@@ -145,9 +163,16 @@ const config: Config = {
         {
           title: 'Hugr Lab',
           items: [
-            {label: 'Main site', href: 'https://hugr-lab.github.io/'},
-            {label: 'DuckDB MSSQL Extension', href: 'https://hugr-lab.github.io/mssql-extension/'},
-            {label: 'DuckLake on SQL Server', href: 'https://hugr-lab.github.io/mssql-ducklake/'},
+            {label: 'Main site', href: site.home},
+            {label: 'DuckDB MSSQL Extension', href: site.docs + 'mssql-extension/'},
+            {label: 'DuckLake on SQL Server', href: site.docs + 'mssql-ducklake/'},
+          ],
+        },
+        {
+          title: 'Legal',
+          items: [
+            {label: 'Impressum', href: site.impressum},
+            {label: 'Datenschutz', href: site.datenschutz},
           ],
         },
       ],
