@@ -25,7 +25,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           # For the extension syntax check below: it needs DuckDB's headers
           # CHECKED OUT, not built.
@@ -94,7 +94,7 @@ jobs:
             runner: macos-14
             require_gss: 'OFF'
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Install GSSAPI (linux)
         if: matrix.os.id == 'linux'
@@ -132,7 +132,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
       - run: sudo apt-get update && sudo apt-get install -y libkrb5-dev gss-ntlmssp ninja-build
@@ -150,7 +150,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - run: sudo apt-get update && sudo apt-get install -y libkrb5-dev gss-ntlmssp ninja-build
       # The DIME decoder and the sealed-frame reader consume bytes from a remote
       # peer. The unit suite feeds them truncated and malformed input on purpose,

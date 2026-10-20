@@ -45,11 +45,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v5
-      - uses: docker/setup-buildx-action@v3
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
 
       - name: Build the NTLM probe image
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v7
         with:
           context: test/gss/ntlm
           tags: xmla-gss-ntlm:latest
@@ -92,11 +92,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v5
-      - uses: docker/setup-buildx-action@v3
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
 
       - name: Build the KDC probe image
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v7
         with:
           context: test/gss/kerberos
           tags: xmla-gss-krb:latest
