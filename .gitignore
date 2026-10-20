@@ -31,4 +31,5 @@ compile_commands.json
 # docs-build.yml both run `npm ci`, which requires it and fails without it.
 website/node_modules/
 website/build/
+website/build-ionos/
 website/.docusaurus/
