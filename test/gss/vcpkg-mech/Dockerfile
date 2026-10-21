@@ -39,10 +39,12 @@ RUN echo "=== the host's mechanism config ===" && cat /etc/gss/mech.d/*.conf
 COPY mech_registration.c /
 RUN gcc -O0 -g -Wall -o /mechs_system /mech_registration.c $(pkg-config --libs krb5-gssapi)
 
-# Pinned to the vcpkg commit the registry selects for the lane that is not
-# DUCKDB_LATEST_STABLE (community-extensions/.github/workflows/build.yml). The
-# stable lane pins 84bab45, where ports/krb5 is 1.22.1 and declares host
-# vcpkg-cmake unconditionally -- a different port revision this does not cover.
+# Pinned to the vcpkg commit the registry selects for every DuckDB version
+# except v1.5.6 (community-extensions/.github/workflows/build.yml) -- since the
+# v2.0.0 release that includes the stable lane, so both lanes that build this
+# extension use it. v1.5.6 pins 84bab45, where ports/krb5 is 1.22.1 and
+# declares host vcpkg-cmake unconditionally -- a port revision this does not
+# cover, and one no v2.0-only extension is built with.
 ARG VCPKG_COMMIT=cd61e1e26a038e82d6550a3ebbe0fbbfe7da78e3
 RUN git clone -q https://github.com/microsoft/vcpkg /opt/vcpkg \
  && git -C /opt/vcpkg checkout -q ${VCPKG_COMMIT} \
