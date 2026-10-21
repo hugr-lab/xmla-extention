@@ -55,17 +55,15 @@ repo:
   # mechanism, and the port cannot currently be built on the registry's Linux
   # images at all. Read that probe's README first.
 
-  # The tree the STABLE lane builds. Expected to FAIL whatever is pinned here:
-  # build.yml sets DUCKDB_LATEST_STABLE to v1.5.5 and feeds `ref` to it, and
-  # `ref` is required and cannot be omitted, so a v2.0-only extension is
-  # compiled against v1.5.5 headers. Nothing in description.yml opts out of a
-  # DuckDB version — excluded_platforms excludes platforms, not versions — so
-  # that is a property of the registry to raise with it rather than something to
-  # fix by changing this file.
-  ref: "4c8d2474939ba7161e1cc82d35bf3929029934fc"
+  # The tree the STABLE lane builds. Since the v2.0.0 release build.yml sets
+  # DUCKDB_LATEST_STABLE to v2.0.0 and feeds `ref` to it, so this is the lane
+  # that publishes what `INSTALL xmla FROM community` fetches on a released
+  # DuckDB. (Before that it was v1.5.5, which a v2.0-only extension cannot
+  # build against, and nothing in this file can opt out of a DuckDB version.)
+  ref: "c6112da659a7f778888e28ed3a045257201cb2f2"
 
-  # The tree the PRERELEASE lane builds, and the only lane that can succeed.
-  # build_next.yml calls build.yml with duckdb_version 'v2.0-cyanoptera' and
+  # The tree the PRERELEASE lane builds: build_next.yml calls build.yml with
+  # duckdb_version 'v2.0-cyanoptera', the v2.0 release branch, and
   # require_ref_next: true, and community-extensions/scripts/build.py uses
   # ref_next whenever DUCKDB_VERSION is not DUCKDB_LATEST_STABLE — so without
   # this field that lane sets extension_ref to None and skips the extension
@@ -73,13 +71,14 @@ repo:
   #
   # It is a separate field rather than a duplicate of `ref` because the two
   # lanes build different DuckDB versions from the same repository, and this is
-  # the version we actually target: .gitmodules pins the duckdb submodule to
-  # branch v2.0-cyanoptera, and the source is v2.0-only (ExtensionLoader,
-  # DUCKDB_CPP_EXTENSION_ENTRY, vector<Identifier>, SetChildCardinality, the
-  # v2.0 StorageExtension/catalog surface). The two pins hold the same SHA
+  # the version we actually target: the duckdb submodule is pinned to the
+  # v2.0.0 tag on branch v2.0-cyanoptera, and the source is v2.0-only
+  # (ExtensionLoader, DUCKDB_CPP_EXTENSION_ENTRY, vector<Identifier>,
+  # SetChildCardinality, the v2.0 StorageExtension/catalog surface, keyword-only
+  # signature parameters). The two pins hold the same SHA
   # today; nothing keeps them equal, and they diverge the moment main carries a
   # commit only one lane should build, which is why they stay distinct fields.
-  ref_next: "4c8d2474939ba7161e1cc82d35bf3929029934fc"
+  ref_next: "c6112da659a7f778888e28ed3a045257201cb2f2"
 
 docs:
   hello_world: |
