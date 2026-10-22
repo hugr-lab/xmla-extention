@@ -145,6 +145,32 @@ jobs:
       # plain ATTACH fail. This job already has the build, so it costs a compile.
       - run: ./scripts/ci/run_capi_tests.sh
 
+      # A build to try by hand on Linux, from a run whose tests passed. The SHELL
+      # ships with it because a source build calls itself v2.0.0-devN, and a
+      # released DuckDB refuses an extension built for any other version string.
+      # Not a release: unsigned, linked against this runner's glibc and the
+      # system libkrb5, and expiring with the artifact.
+      - name: Package a build to try
+        run: |
+          mkdir -p dist
+          cp build/release/duckdb build/release/extension/xmla/xmla.duckdb_extension dist/
+          cat > dist/README.txt <<EOF
+          xmla extension, commit ${GITHUB_SHA}, built on $(. /etc/os-release && echo "$PRETTY_NAME") x86_64
+          against $(./build/release/duckdb -no-agent -noheader -list -c 'SELECT library_version FROM pragma_version()').
+
+          Needs: libgssapi-krb5-2 and, for NTLM, gss-ntlmssp
+            (sudo apt-get install -y libgssapi-krb5-2 gss-ntlmssp)
+
+            chmod +x duckdb
+            ./duckdb -unsigned
+            LOAD './xmla.duckdb_extension';
+          EOF
+      - uses: actions/upload-artifact@v7
+        with:
+          name: xmla-linux-amd64
+          path: dist/
+          retention-days: 14
+
   sanitizers:
     name: ASan + UBSan
     runs-on: ubuntu-latest
